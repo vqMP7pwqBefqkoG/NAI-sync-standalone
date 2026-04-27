@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.8
+// @version      1.1.9
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1667,33 +1667,51 @@
                 }
                 header.querySelector('#nsync-grid-count').textContent = `${blobs.length}枚`;
                 body.innerHTML = '';
-                
-                // 非同期でメタデータハッシュを抽出し、メモリ上の生成順(_nsyncBlobOrder)と照合してソート
-                const orderArray = window._nsyncBlobOrder || [];
-                Promise.all(blobs.map(async (blob) => {
-                    const hash = await extractParamHashFromBlob(blob);
-                    return { blob, hash };
-                })).then(blobInfos => {
-                    // 昇順（古いものが先、新しいものが後）にソート
-                    blobInfos.sort((a,b) => {
-                        let idxA = orderArray.indexOf(a.hash);
-                        let idxB = orderArray.indexOf(b.hash);
-                        if (idxA === -1) idxA = 99999;
-                        if (idxB === -1) idxB = 99999;
-                        return idxA - idxB;
-                    });
-                    
-                    blobInfos.forEach((info, i) => {
-                        const idx = i + 1;
-                        const url = (_origCreateObjectURL || URL.createObjectURL).call(URL, info.blob);
-                        const item = document.createElement('div');
-                        item.className = 'nsync-grid-item';
-                        item.innerHTML = `
-                            <img src="${url}" loading="lazy" alt="Generated #${idx}" />
-                            <div class="nsync-grid-item-idx">#${idx}</div>
-                        `;
-                        item.addEventListener('click', () => openGridLightbox(url));
-                        body.appendChild(item);
+                // LocalDBから真の生成順（直近500件）を取得してソートする
+                new Promise((resolve) => {
+                    const order = [];
+                    const tx = LocalDB.db.transaction('history', 'readonly');
+                    const index = tx.objectStore('history').index('created_at');
+                    const reqCursor = index.openCursor(null, 'prev'); // 新しい順（降順）
+                    let count = 0;
+                    reqCursor.onsuccess = (e) => {
+                        const cursor = e.target.result;
+                        if (cursor && count < 500) {
+                            const item = cursor.value;
+                            order.push((item.prompt||'') + '|' + (item.seed||'') + '|' + (item.steps||'') + '|' + (item.scale||''));
+                            count++;
+                            cursor.continue();
+                        } else {
+                            resolve(order);
+                        }
+                    };
+                    reqCursor.onerror = () => resolve(order);
+                }).then(orderArray => {
+                    Promise.all(blobs.map(async (blob) => {
+                        const hash = await extractParamHashFromBlob(blob);
+                        return { blob, hash };
+                    })).then(blobInfos => {
+                        // 新しいものが先（5,4,3,2,1）になるようにソート
+                        blobInfos.sort((a,b) => {
+                            let idxA = orderArray.indexOf(a.hash);
+                            let idxB = orderArray.indexOf(b.hash);
+                            if (idxA === -1) idxA = 99999;
+                            if (idxB === -1) idxB = 99999;
+                            return idxA - idxB;
+                        });
+                        
+                        blobInfos.forEach((info, i) => {
+                            const idx = blobInfos.length - i;
+                            const url = (_origCreateObjectURL || URL.createObjectURL).call(URL, info.blob);
+                            const item = document.createElement('div');
+                            item.className = 'nsync-grid-item';
+                            item.innerHTML = `
+                                <img src="${url}" loading="lazy" alt="Generated #${idx}" />
+                                <div class="nsync-grid-item-idx">#${idx}</div>
+                            `;
+                            item.addEventListener('click', () => openGridLightbox(url));
+                            body.appendChild(item);
+                        });
                     });
                 });
                 db.close();
@@ -2769,13 +2787,6 @@
                 const sampler = parameters.sampler || null;
                 const width = parameters.width || null;
                 const height = parameters.height || null;
-
-                // 生成順ソート用のハッシュを記録
-                const orderHash = prompt + '|' + seed + '|' + steps + '|' + scale;
-                window._nsyncBlobOrder = window._nsyncBlobOrder || [];
-                if (!window._nsyncBlobOrder.includes(orderHash)) {
-                    window._nsyncBlobOrder.push(orderHash);
-                }
 
                 // キャラクタープロンプト（V3およびV4対応）
                 let charPromptsJson = null;
