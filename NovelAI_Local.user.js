@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.1
+// @version      1.1.2
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -2966,27 +2966,62 @@
         
         processThumbnailData(item);
 
-        // 同じIDが既に存在する場合はカードを入れ替える（自分の送信重複防止）
-        const existing = listEl.querySelector(`[data-id="${item.id}"]`);
+        // グリッドコンテナがなければ作成（初回の生成時）
+        let grid = listEl.querySelector('.nsync-detail-grid');
+        if (!grid) {
+            listEl.innerHTML = '';
+            grid = document.createElement('div');
+            grid.className = 'nsync-detail-grid';
+            listEl.appendChild(grid);
+        }
+
+        // 同じIDが既に存在する場合は削除（重複防止）
+        const existing = grid.querySelector(`[data-id="${item.id}"]`);
         if (existing) existing.remove();
 
         // 最新エントリの時刻がない場合は付与
         if (!item.created_at) {
-            // ローカル生成時刻をUTC形式の文字列に変換してセットする
             const now = new Date();
             item.created_at = `${now.getUTCFullYear()}-${pad(now.getUTCMonth()+1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())}`;
         }
 
-        const el = createListItem(item, true, false, null);
-        listEl.insertBefore(el, listEl.firstChild);
+        // グリッドアイテムを作成
+        const el = document.createElement('div');
+        el.className = 'nsync-detail-item';
+        el.dataset.id = item.id;
+        el.innerHTML = `
+            <img src="${item.thumbnail || ''}" loading="lazy">
+            <button class="nsync-detail-fav" data-id="${item.id}">☆</button>
+        `;
+
+        // 画像タップで復元
+        el.addEventListener('click', () => {
+            if (item.thumbnail && item._metaB64) {
+                simulateDragAndDrop(item.thumbnail, item._metaB64);
+                showToast('画像を反映しました');
+                togglePanel();
+            } else {
+                showToast('❌ 画像メタデータがありません', 'error');
+            }
+        });
+
+        // お気に入りボタン
+        const favBtn = el.querySelector('.nsync-detail-fav');
+        favBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleFavorite(favBtn, item.id);
+        });
+
+        // グリッドの先頭に挿入
+        grid.insertBefore(el, grid.firstChild);
 
         // 点滅アニメーション
         el.style.opacity = '0';
-        el.style.transform = 'translateY(-8px)';
+        el.style.transform = 'scale(0.9)';
         el.style.transition = 'opacity 0.35s, transform 0.35s';
         requestAnimationFrame(() => {
             el.style.opacity = '1';
-            el.style.transform = 'translateY(0)';
+            el.style.transform = 'scale(1)';
         });
     }
 
