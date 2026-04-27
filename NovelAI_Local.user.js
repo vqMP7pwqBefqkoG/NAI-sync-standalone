@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.2
+// @version      1.1.3
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1188,13 +1188,21 @@
         header.querySelectorAll('.nsync-ac-toggle button').forEach(btn => {
             btn.addEventListener('click', async (e) => {
                 e.preventDefault();
+                e.stopPropagation();
+                window._acSwitching = true;
                 acSource = btn.dataset.src;
                 localStorage.setItem('nsync-tag-source', acSource);
+                // エディタにフォーカスを戻す
+                if (acActivePm) acActivePm.focus();
                 // 再検索
                 await fetchAndShowSuggestions(query);
+                setTimeout(() => { window._acSwitching = false; }, 200);
             });
-            // フォーカスを奪わないための mousedown
-            btn.addEventListener('mousedown', e => e.preventDefault());
+            // フォーカスを奪わないための mousedown / pointerdown / touchstart
+            const preventFocus = e => e.preventDefault();
+            btn.addEventListener('mousedown', preventFocus);
+            btn.addEventListener('pointerdown', preventFocus);
+            btn.addEventListener('touchstart', preventFocus, { passive: false });
         });
 
         const list = document.createElement('div');
@@ -1243,6 +1251,7 @@
     }
 
     function hideAutocomplete() {
+        if (window._acSwitching) return; // トグル切り替え中は非表示にしない
         if (acPopup) acPopup.style.display = 'none';
         acSuggestions = [];
         acSelectedIndex = -1;
