@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.3
+// @version      1.1.4
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1186,23 +1186,28 @@
 
         // ソース切り替えイベント
         header.querySelectorAll('.nsync-ac-toggle button').forEach(btn => {
-            btn.addEventListener('click', async (e) => {
+            let _toggled = false;
+            // pointerdown: フォーカス喪失を防ぐ + 切り替えフラグ
+            btn.addEventListener('pointerdown', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                _toggled = false;
+            });
+            // pointerup: 実際の切り替え処理
+            btn.addEventListener('pointerup', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (_toggled) return;
+                _toggled = true;
                 window._acSwitching = true;
                 acSource = btn.dataset.src;
                 localStorage.setItem('nsync-tag-source', acSource);
-                // エディタにフォーカスを戻す
                 if (acActivePm) acActivePm.focus();
-                // 再検索
                 await fetchAndShowSuggestions(query);
                 setTimeout(() => { window._acSwitching = false; }, 200);
             });
-            // フォーカスを奪わないための mousedown / pointerdown / touchstart
-            const preventFocus = e => e.preventDefault();
-            btn.addEventListener('mousedown', preventFocus);
-            btn.addEventListener('pointerdown', preventFocus);
-            btn.addEventListener('touchstart', preventFocus, { passive: false });
+            // mousedown: デスクトップでのフォーカス喪失防止
+            btn.addEventListener('mousedown', e => e.preventDefault());
         });
 
         const list = document.createElement('div');
