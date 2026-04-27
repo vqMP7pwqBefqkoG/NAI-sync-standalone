@@ -16,7 +16,6 @@
     // ============================================================
     // === 設定 ===
     // 配信先URL（タグデータ）
-    // スマホでテストするため、PCのIP(Tailscale)を指定しています
     // ============================================================
     const TAGS_JSON_DANBOORU = 'https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/danbooru_tags.json';
     const TAGS_JSON_E621 = 'https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/e621_tags.json';
