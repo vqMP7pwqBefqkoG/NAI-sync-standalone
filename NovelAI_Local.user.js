@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.6
+// @version      1.1.7
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -2670,6 +2670,8 @@
     }
 
     function processGeneratedImage(blob) {
+        // 非同期処理の前に生成順タイムスタンプを確保
+        const capturedAt = new Date().toISOString();
         const reader = new FileReader();
         reader.onload = (e) => {
             const uint8 = new Uint8Array(e.target.result);
@@ -2762,7 +2764,8 @@
                     negative_prompt: uc,
                     model, scale, steps, seed, sampler, width, height,
                     char_prompts_json: charPromptsJson,
-                    session_id: CURRENT_SESSION_ID
+                    session_id: CURRENT_SESSION_ID,
+                    created_at: capturedAt
                 };
 
                 // Canvasで サムネイル（最短100px）化
