@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.7
+// @version      1.1.8
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1667,18 +1667,34 @@
                 }
                 header.querySelector('#nsync-grid-count').textContent = `${blobs.length}枚`;
                 body.innerHTML = '';
-                // 新しい画像を先頭に（逆順）
-                blobs.reverse().forEach((blob, i) => {
-                    const idx = blobs.length - i;
-                    const url = (_origCreateObjectURL || URL.createObjectURL).call(URL, blob);
-                    const item = document.createElement('div');
-                    item.className = 'nsync-grid-item';
-                    item.innerHTML = `
-                        <img src="${url}" loading="lazy" alt="Generated #${idx}" />
-                        <div class="nsync-grid-item-idx">#${idx}</div>
-                    `;
-                    item.addEventListener('click', () => openGridLightbox(url));
-                    body.appendChild(item);
+                
+                // 非同期でメタデータハッシュを抽出し、メモリ上の生成順(_nsyncBlobOrder)と照合してソート
+                const orderArray = window._nsyncBlobOrder || [];
+                Promise.all(blobs.map(async (blob) => {
+                    const hash = await extractParamHashFromBlob(blob);
+                    return { blob, hash };
+                })).then(blobInfos => {
+                    // 昇順（古いものが先、新しいものが後）にソート
+                    blobInfos.sort((a,b) => {
+                        let idxA = orderArray.indexOf(a.hash);
+                        let idxB = orderArray.indexOf(b.hash);
+                        if (idxA === -1) idxA = 99999;
+                        if (idxB === -1) idxB = 99999;
+                        return idxA - idxB;
+                    });
+                    
+                    blobInfos.forEach((info, i) => {
+                        const idx = i + 1;
+                        const url = (_origCreateObjectURL || URL.createObjectURL).call(URL, info.blob);
+                        const item = document.createElement('div');
+                        item.className = 'nsync-grid-item';
+                        item.innerHTML = `
+                            <img src="${url}" loading="lazy" alt="Generated #${idx}" />
+                            <div class="nsync-grid-item-idx">#${idx}</div>
+                        `;
+                        item.addEventListener('click', () => openGridLightbox(url));
+                        body.appendChild(item);
+                    });
                 });
                 db.close();
             };
@@ -2386,6 +2402,39 @@
         return chunks;
     }
 
+    // Blobの先頭部分(64KB)のみを読み込み、tEXtチャンクからプロンプト・シード等のハッシュを生成する
+    function extractParamHashFromBlob(blob) {
+        return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const uint8 = new Uint8Array(e.target.result);
+                const chunks = parsePngChunks(uint8);
+                if (!chunks) return resolve(null);
+                for (const c of chunks) {
+                    if (c.type === 'tEXt') {
+                        const dec = new TextDecoder().decode(c.data);
+                        if (dec.startsWith('Comment\0')) {
+                            try {
+                                const json = JSON.parse(dec.substring(8));
+                                const p = json.prompt || '';
+                                const parameters = json.parameters || json || {};
+                                const s = parameters.seed || '';
+                                const st = parameters.steps || '';
+                                const sc = parameters.scale || parameters.guidance_scale || '';
+                                resolve(p + '|' + s + '|' + st + '|' + sc);
+                                return;
+                            } catch(err) {}
+                        }
+                    }
+                }
+                resolve(null);
+            };
+            reader.onerror = () => resolve(null);
+            // tEXtチャンクは先頭付近にあるため64KBで十分
+            reader.readAsArrayBuffer(blob.slice(0, 65536)); 
+        });
+    }
+
     // CRC32 計算（PNGチャンク再構築用）
     const _crcTable = (function() {
         const t = new Uint32Array(256);
@@ -2720,6 +2769,13 @@
                 const sampler = parameters.sampler || null;
                 const width = parameters.width || null;
                 const height = parameters.height || null;
+
+                // 生成順ソート用のハッシュを記録
+                const orderHash = prompt + '|' + seed + '|' + steps + '|' + scale;
+                window._nsyncBlobOrder = window._nsyncBlobOrder || [];
+                if (!window._nsyncBlobOrder.includes(orderHash)) {
+                    window._nsyncBlobOrder.push(orderHash);
+                }
 
                 // キャラクタープロンプト（V3およびV4対応）
                 let charPromptsJson = null;
