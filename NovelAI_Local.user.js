@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.0.9
+// @version      1.1.0
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -36,6 +36,9 @@
     let batchTarget = 0;
     let batchCount = 0;
     let batchOnGenerated = null; // 生成完了コールバック
+
+    // 生成ボタンが押された回数をカウントし、手動インポートと区別する
+    let _nsyncPendingGenerations = 0;
 
     // ブラウザセッションID (ページロード時に一意に生成)
     const CURRENT_SESSION_ID = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -2607,7 +2610,7 @@
         window.URL.createObjectURL = function(obj) {
             const url = _origCreateObjectURL.apply(this, arguments);
             if (obj && obj instanceof Blob && obj.type === 'image/png') {
-                if (!window._nsyncIsRestoring && !obj._nsyncProcessed) {
+                if (!obj._nsyncProcessed) {
                     obj._nsyncProcessed = true;
                     setTimeout(() => processGeneratedImage(obj), 50);
                 }
@@ -2615,34 +2618,23 @@
             return url;
         };
 
-        // ユーザーが手動で画像をインポートした場合（D&Dやファイル選択）を検出し、
-        // 履歴への誤登録を防止する
-        document.addEventListener('drop', (e) => {
-            // スクリプト自身が発行したD&Dイベントは除外（simulateDragAndDropで既にフラグ済み）
-            if (window._nsyncIsRestoring) return;
-            const files = e.dataTransfer && e.dataTransfer.files;
-            if (files && files.length > 0) {
-                const hasImage = Array.from(files).some(f => f.type.startsWith('image/'));
-                if (hasImage) {
-                    window._nsyncIsRestoring = true;
-                    console.log('[N-Sync] User image import detected (drop) – skipping history save');
-                    setTimeout(() => { window._nsyncIsRestoring = false; }, 3000);
-                }
+        // Generateボタンのクリックを監視し、生成カウンターをインクリメントする
+        // ボタンはNovelAIのSPA内で動的に再生成されるため、MutationObserverで追跡する
+        let _lastGenBtn = null;
+        function attachGenBtnListener() {
+            const btn = findGenerateButton();
+            if (btn && btn !== _lastGenBtn) {
+                _lastGenBtn = btn;
+                btn.addEventListener('click', () => {
+                    _nsyncPendingGenerations++;
+                    console.log(`[N-Sync] Generate clicked (pending: ${_nsyncPendingGenerations})`);
+                }, { capture: true });
             }
-        }, true);
-
-        document.addEventListener('change', (e) => {
-            if (window._nsyncIsRestoring) return;
-            const input = e.target;
-            if (input && input.tagName === 'INPUT' && input.type === 'file') {
-                const hasImage = input.files && Array.from(input.files).some(f => f.type.startsWith('image/'));
-                if (hasImage) {
-                    window._nsyncIsRestoring = true;
-                    console.log('[N-Sync] User image import detected (file input) – skipping history save');
-                    setTimeout(() => { window._nsyncIsRestoring = false; }, 3000);
-                }
-            }
-        }, true);
+        }
+        // 初回チェック + DOMの変化を監視して自動的に再アタッチ
+        attachGenBtnListener();
+        const genObserver = new MutationObserver(() => attachGenBtnListener());
+        genObserver.observe(document.body, { childList: true, subtree: true });
 
         console.log('[N-Sync] URL.createObjectURL patched ✓');
     }
@@ -2779,6 +2771,13 @@
     }
 
     function sendToHub(data) {
+        // Generateボタンが押されていない場合（手動インポート）は履歴に保存しない
+        if (_nsyncPendingGenerations <= 0) {
+            console.log('[N-Sync] Skipping history save (no pending generation – likely an import)');
+            return;
+        }
+        _nsyncPendingGenerations--;
+
         if (!data.prompt) return;
         data.session_id = CURRENT_SESSION_ID;
         LocalDB.addHistory(data)
