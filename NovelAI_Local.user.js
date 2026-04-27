@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.0.8
+// @version      1.0.9
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -2614,6 +2614,35 @@
             }
             return url;
         };
+
+        // ユーザーが手動で画像をインポートした場合（D&Dやファイル選択）を検出し、
+        // 履歴への誤登録を防止する
+        document.addEventListener('drop', (e) => {
+            // スクリプト自身が発行したD&Dイベントは除外（simulateDragAndDropで既にフラグ済み）
+            if (window._nsyncIsRestoring) return;
+            const files = e.dataTransfer && e.dataTransfer.files;
+            if (files && files.length > 0) {
+                const hasImage = Array.from(files).some(f => f.type.startsWith('image/'));
+                if (hasImage) {
+                    window._nsyncIsRestoring = true;
+                    console.log('[N-Sync] User image import detected (drop) – skipping history save');
+                    setTimeout(() => { window._nsyncIsRestoring = false; }, 3000);
+                }
+            }
+        }, true);
+
+        document.addEventListener('change', (e) => {
+            if (window._nsyncIsRestoring) return;
+            const input = e.target;
+            if (input && input.tagName === 'INPUT' && input.type === 'file') {
+                const hasImage = input.files && Array.from(input.files).some(f => f.type.startsWith('image/'));
+                if (hasImage) {
+                    window._nsyncIsRestoring = true;
+                    console.log('[N-Sync] User image import detected (file input) – skipping history save');
+                    setTimeout(() => { window._nsyncIsRestoring = false; }, 3000);
+                }
+            }
+        }, true);
 
         console.log('[N-Sync] URL.createObjectURL patched ✓');
     }
