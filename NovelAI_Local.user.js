@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
+// @version      1.1.1
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -2618,23 +2618,28 @@
             return url;
         };
 
-        // Generateボタンのクリックを監視し、生成カウンターをインクリメントする
-        // ボタンはNovelAIのSPA内で動的に再生成されるため、MutationObserverで追跡する
-        let _lastGenBtn = null;
-        function attachGenBtnListener() {
-            const btn = findGenerateButton();
-            if (btn && btn !== _lastGenBtn) {
-                _lastGenBtn = btn;
-                btn.addEventListener('click', () => {
-                    _nsyncPendingGenerations++;
-                    console.log(`[N-Sync] Generate clicked (pending: ${_nsyncPendingGenerations})`);
-                }, { capture: true });
+        // Generateボタンのタップ/クリックを検出し、生成カウンターをインクリメント
+        // イベント委譲方式：ボタンがReactで再生成されても確実に検出できる
+        function isGenerateButton(el) {
+            let node = el;
+            while (node && node !== document.body) {
+                if (node.tagName === 'BUTTON') {
+                    const span = node.querySelector('span');
+                    if (span && /^Generate \d+ Image/.test(span.textContent)) {
+                        return true;
+                    }
+                }
+                node = node.parentElement;
             }
+            return false;
         }
-        // 初回チェック + DOMの変化を監視して自動的に再アタッチ
-        attachGenBtnListener();
-        const genObserver = new MutationObserver(() => attachGenBtnListener());
-        genObserver.observe(document.body, { childList: true, subtree: true });
+
+        document.addEventListener('pointerdown', (e) => {
+            if (isGenerateButton(e.target)) {
+                _nsyncPendingGenerations++;
+                console.log(`[N-Sync] Generate tapped (pending: ${_nsyncPendingGenerations})`);
+            }
+        }, true);
 
         console.log('[N-Sync] URL.createObjectURL patched ✓');
     }
@@ -2919,7 +2924,8 @@
             }, 1500);
         };
 
-        // ボタンをクリック
+        // ボタンをクリック（プログラム的なclickはpointerdownを発火しないため、手動でカウント）
+        _nsyncPendingGenerations++;
         genBtn.click();
     }
 
