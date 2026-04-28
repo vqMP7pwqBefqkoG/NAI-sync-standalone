@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.9
+// @version      1.1.10
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1642,85 +1642,29 @@
         };
         document.addEventListener('keydown', escHandler);
 
-        // NovelAI の IndexedDB から画像を読み込む
-        const req = indexedDB.open('generated-images');
-        req.onerror = () => {
-            body.innerHTML = '<div style="color:#e55;font-size:13px;padding:40px;text-align:center;">❌ NovelAI の画像データベースを開けませんでした</div>';
-        };
-        req.onsuccess = (e) => {
-            const db = e.target.result;
-            if (!db.objectStoreNames.contains('images')) {
-                body.innerHTML = '<div style="color:#e55;font-size:13px;padding:40px;text-align:center;">❌ images ストアが見つかりません</div>';
-                db.close();
-                return;
-            }
-            const tx = db.transaction('images', 'readonly');
-            const store = tx.objectStore('images');
-            const allReq = store.getAll();
-            allReq.onsuccess = () => {
-                const blobs = allReq.result;
-                if (!blobs || blobs.length === 0) {
-                    body.innerHTML = '<div style="color:#555;font-size:13px;padding:40px;text-align:center;">このセッションで生成された画像がまだありません</div>';
-                    header.querySelector('#nsync-grid-count').textContent = '0枚';
-                    db.close();
-                    return;
-                }
-                header.querySelector('#nsync-grid-count').textContent = `${blobs.length}枚`;
-                body.innerHTML = '';
-                // LocalDBから真の生成順（直近500件）を取得してソートする
-                new Promise((resolve) => {
-                    const order = [];
-                    const tx = LocalDB.db.transaction('history', 'readonly');
-                    const index = tx.objectStore('history').index('created_at');
-                    const reqCursor = index.openCursor(null, 'prev'); // 新しい順（降順）
-                    let count = 0;
-                    reqCursor.onsuccess = (e) => {
-                        const cursor = e.target.result;
-                        if (cursor && count < 500) {
-                            const item = cursor.value;
-                            order.push((item.prompt||'') + '|' + (item.seed||'') + '|' + (item.steps||'') + '|' + (item.scale||''));
-                            count++;
-                            cursor.continue();
-                        } else {
-                            resolve(order);
-                        }
-                    };
-                    reqCursor.onerror = () => resolve(order);
-                }).then(orderArray => {
-                    Promise.all(blobs.map(async (blob) => {
-                        const hash = await extractParamHashFromBlob(blob);
-                        return { blob, hash };
-                    })).then(blobInfos => {
-                        // 新しいものが先（5,4,3,2,1）になるようにソート
-                        blobInfos.sort((a,b) => {
-                            let idxA = orderArray.indexOf(a.hash);
-                            let idxB = orderArray.indexOf(b.hash);
-                            if (idxA === -1) idxA = 99999;
-                            if (idxB === -1) idxB = 99999;
-                            return idxA - idxB;
-                        });
-                        
-                        blobInfos.forEach((info, i) => {
-                            const idx = blobInfos.length - i;
-                            const url = (_origCreateObjectURL || URL.createObjectURL).call(URL, info.blob);
-                            const item = document.createElement('div');
-                            item.className = 'nsync-grid-item';
-                            item.innerHTML = `
-                                <img src="${url}" loading="lazy" alt="Generated #${idx}" />
-                                <div class="nsync-grid-item-idx">#${idx}</div>
-                            `;
-                            item.addEventListener('click', () => openGridLightbox(url));
-                            body.appendChild(item);
-                        });
-                    });
-                });
-                db.close();
-            };
-            allReq.onerror = () => {
-                body.innerHTML = '<div style="color:#e55;font-size:13px;padding:40px;text-align:center;">❌ 画像の読み込みに失敗しました</div>';
-                db.close();
-            };
-        };
+        const blobs = window._nsyncSessionBlobs || [];
+        if (blobs.length === 0) {
+            body.innerHTML = '<div style="color:#555;font-size:13px;padding:40px;text-align:center;">このセッションで生成された画像がまだありません</div>';
+            header.querySelector('#nsync-grid-count').textContent = '0枚';
+            return;
+        }
+
+        header.querySelector('#nsync-grid-count').textContent = `${blobs.length}枚`;
+        body.innerHTML = '';
+        
+        // メモリ上の配列は生成順になっているので、そのまま逆順（新しい順）で表示
+        blobs.slice().reverse().forEach((blob, i) => {
+            const idx = blobs.length - i;
+            const url = (_origCreateObjectURL || URL.createObjectURL).call(URL, blob);
+            const item = document.createElement('div');
+            item.className = 'nsync-grid-item';
+            item.innerHTML = `
+                <img src="${url}" loading="lazy" alt="Generated #${idx}" />
+                <div class="nsync-grid-item-idx">#${idx}</div>
+            `;
+            item.addEventListener('click', () => openGridLightbox(url));
+            body.appendChild(item);
+        });
     }
 
     function openGridLightbox(url) {
@@ -2771,6 +2715,10 @@
                 return; // すでに処理された画像なのでスキップ
             }
             window._nsyncSeenJSONs.add(jsonString);
+
+            // セッション画像グリッド表示用にBlobを記憶（ページリロードでリセットされる）
+            window._nsyncSessionBlobs = window._nsyncSessionBlobs || [];
+            window._nsyncSessionBlobs.push(blob);
 
             try {
                 let apiData = {};
