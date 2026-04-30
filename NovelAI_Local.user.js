@@ -2363,38 +2363,7 @@
         return chunks;
     }
 
-    // Blobの先頭部分(64KB)のみを読み込み、tEXtチャンクからプロンプト・シード等のハッシュを生成する
-    function extractParamHashFromBlob(blob) {
-        return new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const uint8 = new Uint8Array(e.target.result);
-                const chunks = parsePngChunks(uint8);
-                if (!chunks) return resolve(null);
-                for (const c of chunks) {
-                    if (c.type === 'tEXt') {
-                        const dec = new TextDecoder().decode(c.data);
-                        if (dec.startsWith('Comment\0')) {
-                            try {
-                                const json = JSON.parse(dec.substring(8));
-                                const p = json.prompt || '';
-                                const parameters = json.parameters || json || {};
-                                const s = parameters.seed || '';
-                                const st = parameters.steps || '';
-                                const sc = parameters.scale || parameters.guidance_scale || '';
-                                resolve(p + '|' + s + '|' + st + '|' + sc);
-                                return;
-                            } catch(err) {}
-                        }
-                    }
-                }
-                resolve(null);
-            };
-            reader.onerror = () => resolve(null);
-            // tEXtチャンクは先頭付近にあるため64KBで十分
-            reader.readAsArrayBuffer(blob.slice(0, 65536)); 
-        });
-    }
+
 
     // CRC32 計算（PNGチャンク再構築用）
     const _crcTable = (function() {
