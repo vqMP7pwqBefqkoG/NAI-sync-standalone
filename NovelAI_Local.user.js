@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.13
+// @version      1.1.14
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1021,9 +1021,7 @@
     let acPopup = null;
     let acSuggestions = [];
     let acSelectedIndex = -1;
-    let acCurrentQuery = '';
     let acPrefix = '';
-    let acFullTypedWord = '';
     let acActivePm = null;
     let acAbsStart = 0;
     let acAbsEnd = 0;
@@ -1142,9 +1140,7 @@
                 acPopup.style.top = `${rect.y + rect.height + 5 + window.scrollY}px`;
             }
 
-            acCurrentQuery = searchWord;
             acPrefix = prefix;
-            acFullTypedWord = currentWord;
             
             acActivePm = pm;
             acAbsStart = absOffset - currentWord.length;
@@ -2097,12 +2093,6 @@
         data.forEach(item => {
             // favorites結合レスポンス形式: fav_id, label, + historyのフィールド
             const el = createListItem(item, false, true, item.fav_id);
-            if (item.label) {
-                const labelBadge = document.createElement('div');
-                labelBadge.style.cssText = 'font-size:10px;color:#fbbf24;margin-top:2px;';
-                labelBadge.textContent = `⭐ ${item.label}`;
-                el.querySelector('.nsync-item-preview').appendChild(labelBadge);
-            }
             listEl.appendChild(el);
         });
     }
@@ -2117,7 +2107,6 @@
         const dt = dtStrVal ? new Date(norm.endsWith('Z') ? norm : norm + 'Z') : new Date();
         const dateStr = `${dt.getFullYear()}/${pad(dt.getMonth()+1)}/${pad(dt.getDate())}`;
         const timeStr = `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
-        const meta = [item.model, item.steps ? `${item.steps}st` : null, item.scale ? `CFG${item.scale}` : null, item.sampler].filter(Boolean).join('·');
 
         const el = document.createElement('div');
         el.className = 'nsync-item' + (isNew ? ' nsync-item-new' : '');
@@ -2236,112 +2225,6 @@
             .catch(() => { showToast('解除に失敗しました', 'error'); });
     }
 
-    // ============================================================
-    // === 詳細ポップアップ ===
-    // ============================================================
-    function showDetail(id) {
-        LocalDB.getHistoryItem(id)
-            .then(data => { 
-                if (!data) throw new Error();
-                processThumbnailData(data); 
-                renderDetail(data); 
-            })
-            .catch(() => { showToast('詳細の取得に失敗しました', 'error'); });
-    }
-
-    function renderDetail(item) {
-        document.getElementById('nsync-overlay')?.remove();
-
-        const dtStrVal = item.created_at || '';
-        const norm = dtStrVal.replace(' ', 'T');
-        const dt = dtStrVal ? new Date(norm.endsWith('Z') ? norm : norm + 'Z') : new Date();
-        const dtStr = `${dt.getFullYear()}/${pad(dt.getMonth()+1)}/${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())} JST`;
-
-        // char_prompts_json をパース
-        let charPrompts = [];
-        try { charPrompts = item.char_prompts_json ? JSON.parse(item.char_prompts_json) : []; } catch(e) {}
-
-        const charHtml = charPrompts.length > 0
-            ? charPrompts.map((c, i) => {
-                const pos = typeof c === 'object' ? (c.char_caption  || '') : String(c);
-                const neg = typeof c === 'object' ? (c.char_negative || '') : '';
-                return `
-                <div class="nsync-ds">
-                    <div class="nsync-dl">\uD83D\uDC64 \u30AD\u30E3\u30E9\u30AF\u30BF\u30FC ${i + 1}</div>
-                    <div class="nsync-dv char">${esc(pos)}</div>
-                    ${neg !== '' ? `<div class="nsync-dl" style="color:#e55;margin-top:4px;">&#x26D4; \u30CD\u30AC\u30C6\u30A3\u30D6</div><div class="nsync-dv char" style="color:#f87171;">${esc(neg)}</div>` : '<div style="font-size:10px;color:#555;margin-top:2px;">&#x26D4; \u30CD\u30AC\u30C6\u30A3\u30D6: (\u306A\u3057)</div>'}
-                </div>`;
-            }).join('')
-            : '';
-
-        // 追加パラメータ
-        const extras = [];
-        if (item.noise_schedule) extras.push(['Noise Sched.', item.noise_schedule]);
-        if (item.cfg_rescale != null && item.cfg_rescale !== '') extras.push(['CFG Rescale', item.cfg_rescale]);
-        if (item.smea) extras.push(['SMEA', item.smea_dyn ? 'DYN' : 'ON']);
-        if (item.extra_noise_seed) extras.push(['Extra Seed', item.extra_noise_seed]);
-
-        const overlay = document.createElement('div');
-        overlay.id = 'nsync-overlay';
-        overlay.innerHTML = `
-            <div id="nsync-detail-box">
-                <div class="nsync-dh">
-                    <h3>📋 ${esc(dtStr)}</h3>
-                    <button id="nsync-dc">✕</button>
-                </div>
-                <div class="nsync-db">
-                    <div class="nsync-ds">
-                        <div class="nsync-dl">🖊 ベースプロンプト</div>
-                        <div class="nsync-dv">${esc(item.prompt || '(なし)')}</div>
-                    </div>
-                    ${charHtml}
-                    <div class="nsync-ds">
-                        <div class="nsync-dl">🚫 ネガティブプロンプト</div>
-                        <div class="nsync-dv">${esc(item.negative_prompt || '(なし)')}</div>
-                    </div>
-                    <div class="nsync-ds">
-                        <div class="nsync-dl">⚙️ 生成設定</div>
-                        <div class="nsync-params">
-                            <div class="nsync-param"><div class="nsync-param-n">Model</div><div class="nsync-param-v">${esc(item.model||'-')}</div></div>
-                            <div class="nsync-param"><div class="nsync-param-n">Steps</div><div class="nsync-param-v">${item.steps||'-'}</div></div>
-                            <div class="nsync-param"><div class="nsync-param-n">CFG (Scale)</div><div class="nsync-param-v">${item.scale||'-'}</div></div>
-                            <div class="nsync-param"><div class="nsync-param-n">Sampler</div><div class="nsync-param-v">${esc(item.sampler||'-')}</div></div>
-                            <div class="nsync-param"><div class="nsync-param-n">Seed</div><div class="nsync-param-v">${esc(item.seed||'-')}</div></div>
-                            <div class="nsync-param"><div class="nsync-param-n">Size</div><div class="nsync-param-v">${item.width&&item.height ? `${item.width}×${item.height}` : '-'}</div></div>
-                            ${extras.map(([n,v]) => `<div class="nsync-param"><div class="nsync-param-n">${esc(n)}</div><div class="nsync-param-v">${esc(String(v))}</div></div>`).join('')}
-                        </div>
-                    </div>
-                </div>
-                <div class="nsync-df">
-                    <button class="nsync-btn-fav" id="nsync-d-fav">⭐ お気に入り</button>
-                    <button class="nsync-btn-cancel" id="nsync-d-cancel">閉じる</button>
-                    <button class="nsync-btn-apply" id="nsync-d-apply">✨ NAIに反映</button>
-                </div>
-            </div>
-        `;
-        document.body.appendChild(overlay);
-
-        overlay.querySelector('#nsync-dc').addEventListener('click', () => overlay.remove());
-        overlay.querySelector('#nsync-d-cancel').addEventListener('click', () => overlay.remove());
-        overlay.querySelector('#nsync-d-apply').addEventListener('click', () => { 
-            if (item.thumbnail) {
-                simulateDragAndDrop(item.thumbnail, item._metaB64);
-            } else {
-                showToast('❌ この履歴には画像メタデータがありません', 'error');
-            }
-            overlay.remove(); 
-        });
-        overlay.querySelector('#nsync-d-fav').addEventListener('click', () => {
-            fetch(`${HUB_URL}/api/favorites`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ history_id: item.id })
-            })
-                .then(() => { showToast('⭐ お気に入りに追加しました'); overlay.remove(); })
-                .catch(() => { showToast('追加に失敗しました', 'error'); });
-        });
-        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-    }
 
     // ============================================================
     // === PNGメタデータ抽出＆インジェクション ===
@@ -2940,31 +2823,6 @@
         genBtn.click();
     }
 
-    // ============================================================
-    // === Socket.io ===
-    // ============================================================
-    function initSocket() {
-        if (typeof io === 'undefined') {
-            console.warn('[N-Sync] socket.io not available');
-            return;
-        }
-        socket = io(HUB_URL, { transports: ['websocket', 'polling'] });
-
-        socket.on('connect', () => {
-            const el = document.getElementById('nsync-status');
-            if (el) { el.textContent = '● 接続済み'; el.className = 'ok'; }
-        });
-        socket.on('disconnect', () => {
-            const el = document.getElementById('nsync-status');
-            if (el) { el.textContent = '● 切断'; el.className = ''; }
-        });
-        socket.on('SYNC_LATEST', (newEntry) => {
-            // 別デバイスからの新規エントリを直接先頭に追加
-            if (panelOpen && activeTab === 'history' && newEntry && newEntry.id) {
-                prependToList(newEntry);
-            }
-        });
-    }
 
     // ============================================================
     // === リストの先頭にエントリを追加（再読込み不要）===
@@ -3059,7 +2917,7 @@
             });
 
             
-            console.log('[N-Sync] v6.8.2 Ready');
+            console.log('[N-Local] v1.1.14 Ready');
         }
 
         const t = setInterval(() => {
