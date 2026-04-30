@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.11
+// @version      1.1.12
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -2007,7 +2007,6 @@
                     <span class="nsync-folder-count">${s.count}枚</span>
                     <span class="nsync-folder-time">${timeStr}</span>
                 </div>
-                <div class="nsync-folder-prompt">${esc(s.prompt || 'プロンプトなし')}</div>
             `;
             folder.addEventListener('click', () => loadSessionDetail(s.session_id));
             grid.appendChild(folder);
