@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.29
+// @version      1.1.31
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1000,11 +1000,11 @@
                         <label style="display:block;"><input type="checkbox" id="nsync-rep-char" checked> キャラクタープロンプト</label>
                     </div>
                     <div style="margin-bottom:10px; position:relative;">
-                        <input type="text" id="nsync-rep-search" placeholder="検索ワード (大文字小文字区別)" style="width:100%; padding:8px; box-sizing:border-box; background:#1a1025; color:#fff; border:1px solid #3d2960; border-radius:4px; margin-bottom:10px;">
-                        <input type="text" id="nsync-rep-target" placeholder="置換ワード" style="width:100%; padding:8px; box-sizing:border-box; background:#1a1025; color:#fff; border:1px solid #3d2960; border-radius:4px;">
+                        <input type="text" id="nsync-rep-search" autocomplete="off" placeholder="検索ワード (大文字小文字区別)" style="width:100%; padding:8px; box-sizing:border-box; background:#1a1025; color:#fff; border:1px solid #3d2960; border-radius:4px; margin-bottom:10px;">
+                        <input type="text" id="nsync-rep-target" autocomplete="off" placeholder="置換ワード" style="width:100%; padding:8px; box-sizing:border-box; background:#1a1025; color:#fff; border:1px solid #3d2960; border-radius:4px;">
                     </div>
-                    <button id="nsync-do-replace" style="width:100%;padding:10px;margin-bottom:10px;background:#6e40c9;color:#fff;border:none;border-radius:5px;cursor:pointer;">✅ 置換を実行</button>
-                    <button id="nsync-close-replace" style="background:none;border:none;color:#888;cursor:pointer;">閉じる</button>
+                    <button id="nsync-do-replace" style="width:100%;padding:10px;margin-bottom:10px;background:#6e40c9;color:#fff;border:none;border-radius:5px;cursor:pointer;font-weight:bold;">✅ 置換を実行</button>
+                    <button id="nsync-close-replace" style="width:100%;padding:10px;background:#2d2040;color:#c4a8e8;border:none;border-radius:5px;cursor:pointer;">閉じる</button>
                     <div style="margin-top:10px; font-size:11px; color:#888; text-align:left;">
                         ※キャラクタープロンプトが閉じている場合は自動で展開して置換を試みます。
                     </div>
@@ -1012,19 +1012,36 @@
             `;
             document.body.appendChild(overlay);
 
+            const getTextWidth = (text, font) => {
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                context.font = font;
+                return context.measureText(text).width;
+            };
+
             // サジェスト機能の追加
             const bindAc = (inputId) => {
                 const inputEl = document.getElementById(inputId);
                 let debounceTimer;
                 const sugBox = document.createElement('div');
-                sugBox.style.cssText = 'position:fixed; background:#12101a; border:1px solid #3d2960; border-radius:4px; max-height:150px; overflow-y:auto; z-index:100002; display:none; text-align:left; box-shadow:0 5px 15px rgba(0,0,0,0.5);';
+                sugBox.style.cssText = 'position:fixed; background:#12101a; border:1px solid #3d2960; border-radius:6px; max-height:220px; overflow-y:auto; z-index:100002; display:none; text-align:left; box-shadow:0 4px 12px rgba(0,0,0,0.5); font-size:13px; color:#fff; min-width:250px;';
                 document.body.appendChild(sugBox);
 
                 const updatePos = () => {
                     const rect = inputEl.getBoundingClientRect();
-                    sugBox.style.top = rect.bottom + 'px';
-                    sugBox.style.left = rect.left + 'px';
-                    sugBox.style.width = rect.width + 'px';
+                    const style = window.getComputedStyle(inputEl);
+                    const font = `${style.fontWeight || 'normal'} ${style.fontSize} ${style.fontFamily}`;
+                    const textBefore = inputEl.value.substring(0, inputEl.selectionStart);
+                    
+                    let caretX = getTextWidth(textBefore, font) + parseInt(style.paddingLeft);
+                    caretX -= inputEl.scrollLeft;
+                    
+                    let left = rect.left + caretX;
+                    if (left + 280 > window.innerWidth) left = window.innerWidth - 290;
+                    
+                    sugBox.style.left = left + 'px';
+                    sugBox.style.bottom = 'auto';
+                    sugBox.style.top = (rect.bottom + 5) + 'px';
                 };
 
                 inputEl.addEventListener('input', () => {
@@ -1038,7 +1055,7 @@
                             return;
                         }
                         
-                        const source = localStorage.getItem('nsync-ac-source') || 'danbooru';
+                        const source = localStorage.getItem('nsync-tag-source') || 'danbooru';
                         const results = await LocalDB.searchTags(query, source);
                         
                         if (results && results.length > 0) {
@@ -1046,15 +1063,16 @@
                             updatePos();
 
                             results.forEach(tag => {
+                                const tagName = tag.name.replace(/_/g, ' ');
                                 const item = document.createElement('div');
-                                item.style.cssText = 'padding:6px 10px; cursor:pointer; color:#c4a8e8; font-size:12px; border-bottom:1px solid #2d2040;';
-                                item.textContent = tag.name;
+                                item.style.cssText = 'padding:8px 12px; cursor:pointer; color:#c4a8e8; font-size:13px; border-bottom:1px solid #2d2040; font-family:"Source Sans Pro",sans-serif;';
+                                item.textContent = tagName;
                                 item.addEventListener('mouseenter', () => item.style.background = '#2d2040');
                                 item.addEventListener('mouseleave', () => item.style.background = 'transparent');
                                 item.addEventListener('mousedown', (e) => { // blurより先に発火させる
                                     e.preventDefault();
                                     const before = val.substring(0, val.lastIndexOf(match[1]));
-                                    inputEl.value = before + (before.endsWith(', ') || before === '' ? '' : before.endsWith(',') ? ' ' : '') + tag.name + ', ';
+                                    inputEl.value = before + (before.endsWith(', ') || before === '' ? '' : before.endsWith(',') ? ' ' : '') + tagName + ', ';
                                     sugBox.style.display = 'none';
                                     inputEl.focus();
                                 });
@@ -1067,9 +1085,30 @@
                     }, 300);
                 });
                 
-                inputEl.addEventListener('blur', () => {
-                    sugBox.style.display = 'none';
+                inputEl.addEventListener('mousedown', (e) => {
+                    if (document.activeElement === inputEl && sugBox.style.display === 'block') {
+                        sugBox.style.display = 'none';
+                        inputEl.dataset.forceClosed = "true";
+                    } else {
+                        inputEl.dataset.forceClosed = "false";
+                    }
                 });
+
+                inputEl.addEventListener('focus', () => {
+                    if (inputEl.dataset.forceClosed === "true") return;
+                    inputEl.dispatchEvent(new Event('input'));
+                });
+
+                document.addEventListener('mousedown', (e) => {
+                    if (sugBox.style.display !== 'none' && !inputEl.contains(e.target) && !sugBox.contains(e.target)) {
+                        sugBox.style.display = 'none';
+                    }
+                }, true);
+                document.addEventListener('touchstart', (e) => {
+                    if (sugBox.style.display !== 'none' && !inputEl.contains(e.target) && !sugBox.contains(e.target)) {
+                        sugBox.style.display = 'none';
+                    }
+                }, { capture: true, passive: true });
 
                 const detailBox = document.getElementById('nsync-detail-box');
                 if (detailBox) {
@@ -1098,56 +1137,7 @@
                     return;
                 }
 
-                if (doChar) {
-                    const firstPm = document.querySelector('.ProseMirror');
-                    if (firstPm) {
-                        let container = firstPm;
-                        for (let i = 0; i < 6; i++) {
-                            if (container.parentElement) container = container.parentElement;
-                        }
-                        const iter = document.createNodeIterator(container, NodeFilter.SHOW_TEXT);
-                        let node;
-                        while ((node = iter.nextNode())) {
-                            if (node.nodeValue.includes(searchStr)) {
-                                let el = node.parentElement;
-                                if (el && !el.closest('.ProseMirror') && !el.closest('#nsync-panel') && !el.closest('#nsync-overlay')) {
-                                    el.click();
-                                    if (el.parentElement) el.parentElement.click();
-                                }
-                            }
-                        }
-                        await new Promise(r => setTimeout(r, 200));
-                    }
-                }
-
-                // 表示されているProseMirrorのみを対象にする (offsetParent !== null)
-                const pms = Array.from(document.querySelectorAll('.ProseMirror')).filter(pm => pm.offsetParent !== null);
-                let replacedCount = 0;
-
-                for (let i = 0; i < pms.length; i++) {
-                    const pm = pms[i];
-                    
-                    let type = 'char';
-                    if (i === 0) {
-                        type = 'main';
-                    } else {
-                        let parent = pm.parentElement;
-                        let isNeg = false;
-                        for(let j=0; j<5; j++) {
-                            if (parent && parent.innerText && parent.innerText.includes('Undesired Content')) {
-                                isNeg = true; break;
-                            }
-                            if (parent) parent = parent.parentElement;
-                        }
-                        if (isNeg || i === 1) {
-                            type = 'neg';
-                        }
-                    }
-
-                    if (type === 'main' && !doMain) continue;
-                    if (type === 'neg' && !doNeg) continue;
-                    if (type === 'char' && !doChar) continue;
-
+                const processVisiblePM = (pm) => {
                     const fullText = pm.innerText;
                     if (fullText.includes(searchStr)) {
                         pm.focus();
@@ -1159,7 +1149,93 @@
                         
                         const newText = fullText.split(searchStr).join(targetStr);
                         document.execCommand('insertText', false, newText);
-                        replacedCount++;
+                        return true;
+                    }
+                    return false;
+                };
+
+                let replacedCount = 0;
+
+                // 1. メインプロンプトとネガティブプロンプトの処理
+                const allPms = Array.from(document.querySelectorAll('.ProseMirror'));
+                for (let i = 0; i < allPms.length; i++) {
+                    const pm = allPms[i];
+                    if (pm.closest('.character-prompt-input') || pm.closest('[class*="prompt-input-box-character-prompts"]')) {
+                        continue; // キャラクタープロンプトは後で処理する
+                    }
+                    
+                    let isNeg = false;
+                    let p = pm.parentElement;
+                    while (p && p !== document.body) {
+                        if (p.innerText && p.innerText.includes('Undesired Content')) {
+                            isNeg = true;
+                        }
+                        p = p.parentElement;
+                    }
+                    
+                    if (isNeg && i === 1 && !document.querySelector('.character-prompt-input')) {
+                        isNeg = true; // フォールバック
+                    }
+
+                    if (!isNeg && doMain) {
+                        if (pm.offsetParent !== null && processVisiblePM(pm)) replacedCount++;
+                    } else if (isNeg && doNeg) {
+                        if (pm.offsetParent !== null && processVisiblePM(pm)) replacedCount++;
+                    }
+                }
+
+                // 2. キャラクタープロンプトの逐次処理（アコーディオン仕様のため1つずつ開いて置換する）
+                if (doChar) {
+                    let initiallyOpenIndex = -1;
+                    let charInputs = document.querySelectorAll('.character-prompt-input');
+                    
+                    // 最初に開いていたものを記憶
+                    for (let i = 0; i < charInputs.length; i++) {
+                        const pm = charInputs[i].querySelector('.ProseMirror');
+                        if (pm && pm.offsetParent !== null) {
+                            initiallyOpenIndex = i;
+                            break;
+                        }
+                    }
+
+                    for (let i = 0; i < charInputs.length; i++) {
+                        // Reactの再レンダリング対策として毎回取得し直す
+                        charInputs = document.querySelectorAll('.character-prompt-input');
+                        if (!charInputs[i]) break;
+                        
+                        const cp = charInputs[i];
+                        let pm = cp.querySelector('.ProseMirror');
+                        if (!pm) continue;
+                        
+                        // 閉じている場合は開く
+                        if (pm.offsetParent === null) {
+                            const btn = cp.querySelector('[role="button"]');
+                            if (btn) {
+                                btn.click();
+                                await new Promise(r => setTimeout(r, 450)); // アニメーションを待機
+                                pm = cp.querySelector('.ProseMirror'); // 要素を取り直す
+                            }
+                        }
+                        
+                        // 開いた状態で置換実行
+                        if (pm && pm.offsetParent !== null) {
+                            if (processVisiblePM(pm)) replacedCount++;
+                        }
+                    }
+
+                    // 最初に開いていたプロンプトを復元する
+                    if (initiallyOpenIndex !== -1) {
+                        charInputs = document.querySelectorAll('.character-prompt-input');
+                        if (charInputs[initiallyOpenIndex]) {
+                            const pm = charInputs[initiallyOpenIndex].querySelector('.ProseMirror');
+                            if (pm && pm.offsetParent === null) {
+                                const btn = charInputs[initiallyOpenIndex].querySelector('[role="button"]');
+                                if (btn) {
+                                    btn.click();
+                                    await new Promise(r => setTimeout(r, 400));
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1350,20 +1426,61 @@
 
         document.addEventListener('input', handleAcInput);
         document.addEventListener('keydown', handleAcKeydown, true);
-        document.addEventListener('click', (e) => {
+        const hideOnInteraction = (e) => {
             if (acPopup.style.display !== 'none' && !acPopup.contains(e.target)) {
                 hideAutocomplete();
+                const pm = e.target && e.target.closest ? e.target.closest('.ProseMirror') : null;
+                if (pm) {
+                    _acForceClose = true;
+                    _acLastText = pm.textContent || '';
+                }
             }
+        };
+        // ProseMirrorがclickイベントの伝播を止めるため、captureフェーズのmousedown/touchstartで検知する
+        document.addEventListener('mousedown', hideOnInteraction, true);
+        document.addEventListener('touchstart', hideOnInteraction, { capture: true, passive: true });
+
+        let _acLastFocusedPm = null;
+        document.addEventListener('focusin', (e) => {
+            const pm = e.target && e.target.closest ? e.target.closest('.ProseMirror') : null;
+            if (pm && pm !== _acLastFocusedPm) {
+                hideAutocomplete();
+                _acLastQuery = '';
+            }
+            _acLastFocusedPm = pm || _acLastFocusedPm;
+        });
+        document.addEventListener('focusout', (e) => {
+            setTimeout(() => {
+                const active = document.activeElement;
+                const inPm = active && active.closest && active.closest('.ProseMirror');
+                const inAc = acPopup && acPopup.contains(active);
+                if (!inPm && !inAc) {
+                    hideAutocomplete();
+                }
+            }, 100);
         });
     }
 
     let _acDebounceTimer = null;
     let _acLastQuery = '';
+    let _acForceClose = false;
+    let _acLastText = '';
 
     async function handleAcInput(e) {
         if (typeof dpadInserting !== 'undefined' && dpadInserting) return;
         const pm = e.target && e.target.closest ? e.target.closest('.ProseMirror') : null;
         if (!pm) return;
+
+        const currentText = pm.textContent || '';
+        if (_acForceClose) {
+            if (currentText === _acLastText) {
+                // テキストが変更されていないのにinputイベントが発火した（カーソル移動など）場合は無視する
+                return;
+            } else {
+                _acForceClose = false;
+            }
+        }
+        _acLastText = currentText;
 
         const selection = window.getSelection();
         if (!selection || selection.rangeCount === 0) return hideAutocomplete();
