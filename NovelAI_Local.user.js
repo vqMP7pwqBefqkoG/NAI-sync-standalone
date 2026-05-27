@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.35
+// @version      1.1.36
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1001,11 +1001,6 @@
             overlay.innerHTML = `
                 <div id="nsync-detail-box" style="width:320px; padding:20px; text-align:center;">
                     <h3 style="color:#9d7fd4;margin-top:0;">🔍 一括置換</h3>
-                    <div style="text-align:left; font-size:12px; color:#c4a8e8; margin-bottom:15px;">
-                        <label style="display:block; margin-bottom:5px;"><input type="checkbox" id="nsync-rep-main" checked> メインプロンプト</label>
-                        <label style="display:block; margin-bottom:5px;"><input type="checkbox" id="nsync-rep-neg" checked> ネガティブプロンプト</label>
-                        <label style="display:block;"><input type="checkbox" id="nsync-rep-char" checked> キャラクタープロンプト</label>
-                    </div>
                     <div style="margin-bottom:10px; position:relative;">
                         <input type="text" id="nsync-rep-search" autocomplete="off" placeholder="検索ワード (大文字小文字区別)" style="width:100%; padding:8px; box-sizing:border-box; background:#1a1025; color:#fff; border:1px solid #3d2960; border-radius:4px; margin-bottom:10px;">
                         <input type="text" id="nsync-rep-target" autocomplete="off" placeholder="置換ワード" style="width:100%; padding:8px; box-sizing:border-box; background:#1a1025; color:#fff; border:1px solid #3d2960; border-radius:4px;">
@@ -1133,9 +1128,6 @@
 
             document.getElementById('nsync-close-replace').addEventListener('click', () => overlay.remove());
             document.getElementById('nsync-do-replace').addEventListener('click', async () => {
-                const doMain = document.getElementById('nsync-rep-main').checked;
-                const doNeg = document.getElementById('nsync-rep-neg').checked;
-                const doChar = document.getElementById('nsync-rep-char').checked;
                 const searchStr = document.getElementById('nsync-rep-search').value;
                 const targetStr = document.getElementById('nsync-rep-target').value;
 
@@ -1171,30 +1163,11 @@
                         continue; // キャラクタープロンプトは後で処理する
                     }
                     
-                    let isNeg = false;
-                    let p = pm.parentElement;
-                    for (let j = 0; j < 5; j++) {
-                        if (p && p.innerText && p.innerText.includes('Undesired Content')) {
-                            isNeg = true;
-                            break;
-                        }
-                        if (p) p = p.parentElement;
-                    }
-                    
-                    if (!isNeg && i === 1 && !document.querySelector('.character-prompt-input')) {
-                        isNeg = true; // フォールバック
-                    }
-
-                    if (!isNeg && doMain) {
-                        if (pm.offsetParent !== null && processVisiblePM(pm)) replacedCount++;
-                    } else if (isNeg && doNeg) {
-                        if (pm.offsetParent !== null && processVisiblePM(pm)) replacedCount++;
-                    }
+                    if (pm.offsetParent !== null && processVisiblePM(pm)) replacedCount++;
                 }
 
                 // 2. キャラクタープロンプトの逐次処理（アコーディオン仕様のため1つずつ開いて置換する）
-                if (doChar) {
-                    let initiallyOpenIndex = -1;
+                let initiallyOpenIndex = -1;
                     let charInputs = document.querySelectorAll('.character-prompt-input');
                     
                     // 最初に開いていたものを記憶
@@ -1243,9 +1216,7 @@
                                     await new Promise(r => setTimeout(r, 400));
                                 }
                             }
-                        }
                     }
-                }
 
                 overlay.remove();
                 if (replacedCount > 0) {
