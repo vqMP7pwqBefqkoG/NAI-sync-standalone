@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.27
+// @version      1.1.28
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -999,7 +999,7 @@
                         <label style="display:block; margin-bottom:5px;"><input type="checkbox" id="nsync-rep-neg" checked> ネガティブプロンプト</label>
                         <label style="display:block;"><input type="checkbox" id="nsync-rep-char" checked> キャラクタープロンプト</label>
                     </div>
-                    <div style="margin-bottom:10px;">
+                    <div style="margin-bottom:10px; position:relative;">
                         <input type="text" id="nsync-rep-search" placeholder="検索ワード (大文字小文字区別)" style="width:100%; padding:8px; box-sizing:border-box; background:#1a1025; color:#fff; border:1px solid #3d2960; border-radius:4px; margin-bottom:10px;">
                         <input type="text" id="nsync-rep-target" placeholder="置換ワード" style="width:100%; padding:8px; box-sizing:border-box; background:#1a1025; color:#fff; border:1px solid #3d2960; border-radius:4px;">
                     </div>
@@ -1011,6 +1011,62 @@
                 </div>
             `;
             document.body.appendChild(overlay);
+
+            // サジェスト機能の追加
+            const bindAc = (inputId) => {
+                const inputEl = document.getElementById(inputId);
+                let debounceTimer;
+                const sugBox = document.createElement('div');
+                sugBox.style.cssText = 'position:absolute; background:#12101a; border:1px solid #3d2960; border-radius:4px; max-height:150px; overflow-y:auto; z-index:100001; display:none; text-align:left; box-shadow:0 5px 15px rgba(0,0,0,0.5); width:100%; left:0;';
+                inputEl.parentNode.insertBefore(sugBox, inputEl.nextSibling);
+
+                inputEl.addEventListener('input', () => {
+                    clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(async () => {
+                        const val = inputEl.value;
+                        const match = val.match(/([^,]*)$/);
+                        const query = match ? match[1].trim() : '';
+                        if (query.length < 2) {
+                            sugBox.style.display = 'none';
+                            return;
+                        }
+                        
+                        const source = localStorage.getItem('nsync-ac-source') || 'danbooru';
+                        const results = await LocalDB.searchTags(query, source);
+                        
+                        if (results && results.length > 0) {
+                            sugBox.innerHTML = '';
+                            sugBox.style.top = (inputEl.offsetTop + inputEl.offsetHeight) + 'px';
+
+                            results.forEach(tag => {
+                                const item = document.createElement('div');
+                                item.style.cssText = 'padding:6px 10px; cursor:pointer; color:#c4a8e8; font-size:12px; border-bottom:1px solid #2d2040;';
+                                item.textContent = tag.name;
+                                item.addEventListener('mouseenter', () => item.style.background = '#2d2040');
+                                item.addEventListener('mouseleave', () => item.style.background = 'transparent');
+                                item.addEventListener('mousedown', (e) => { // blurより先に発火させる
+                                    e.preventDefault();
+                                    const before = val.substring(0, val.lastIndexOf(match[1]));
+                                    inputEl.value = before + (before.endsWith(', ') || before === '' ? '' : before.endsWith(',') ? ' ' : '') + tag.name + ', ';
+                                    sugBox.style.display = 'none';
+                                    inputEl.focus();
+                                });
+                                sugBox.appendChild(item);
+                            });
+                            sugBox.style.display = 'block';
+                        } else {
+                            sugBox.style.display = 'none';
+                        }
+                    }, 300);
+                });
+                
+                inputEl.addEventListener('blur', () => {
+                    sugBox.style.display = 'none';
+                });
+            };
+
+            bindAc('nsync-rep-search');
+            bindAc('nsync-rep-target');
 
             document.getElementById('nsync-close-replace').addEventListener('click', () => overlay.remove());
             document.getElementById('nsync-do-replace').addEventListener('click', async () => {
@@ -1047,7 +1103,8 @@
                     }
                 }
 
-                const pms = Array.from(document.querySelectorAll('.ProseMirror'));
+                // 表示されているProseMirrorのみを対象にする (offsetParent !== null)
+                const pms = Array.from(document.querySelectorAll('.ProseMirror')).filter(pm => pm.offsetParent !== null);
                 let replacedCount = 0;
 
                 for (let i = 0; i < pms.length; i++) {
