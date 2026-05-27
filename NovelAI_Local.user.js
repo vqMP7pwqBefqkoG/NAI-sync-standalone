@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.28
+// @version      1.1.29
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1017,8 +1017,15 @@
                 const inputEl = document.getElementById(inputId);
                 let debounceTimer;
                 const sugBox = document.createElement('div');
-                sugBox.style.cssText = 'position:absolute; background:#12101a; border:1px solid #3d2960; border-radius:4px; max-height:150px; overflow-y:auto; z-index:100001; display:none; text-align:left; box-shadow:0 5px 15px rgba(0,0,0,0.5); width:100%; left:0;';
-                inputEl.parentNode.insertBefore(sugBox, inputEl.nextSibling);
+                sugBox.style.cssText = 'position:fixed; background:#12101a; border:1px solid #3d2960; border-radius:4px; max-height:150px; overflow-y:auto; z-index:100002; display:none; text-align:left; box-shadow:0 5px 15px rgba(0,0,0,0.5);';
+                document.body.appendChild(sugBox);
+
+                const updatePos = () => {
+                    const rect = inputEl.getBoundingClientRect();
+                    sugBox.style.top = rect.bottom + 'px';
+                    sugBox.style.left = rect.left + 'px';
+                    sugBox.style.width = rect.width + 'px';
+                };
 
                 inputEl.addEventListener('input', () => {
                     clearTimeout(debounceTimer);
@@ -1036,7 +1043,7 @@
                         
                         if (results && results.length > 0) {
                             sugBox.innerHTML = '';
-                            sugBox.style.top = (inputEl.offsetTop + inputEl.offsetHeight) + 'px';
+                            updatePos();
 
                             results.forEach(tag => {
                                 const item = document.createElement('div');
@@ -1062,6 +1069,16 @@
                 
                 inputEl.addEventListener('blur', () => {
                     sugBox.style.display = 'none';
+                });
+
+                const detailBox = document.getElementById('nsync-detail-box');
+                if (detailBox) {
+                    detailBox.addEventListener('scroll', () => {
+                        if (sugBox.style.display === 'block') updatePos();
+                    });
+                }
+                window.addEventListener('resize', () => {
+                    if (sugBox.style.display === 'block') updatePos();
                 });
             };
 
