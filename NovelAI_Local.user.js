@@ -1,18 +1,46 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.14
+// @version      1.1.26
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
 // @updateURL    https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/NovelAI_Local.user.js
 // @downloadURL  https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/NovelAI_Local.user.js
 // ==/UserScript==
 
 (function () {
-    'use strict';
+    // --- GM_xmlhttpRequest Bridge (Sandbox Context) ---
+    window.addEventListener('nsync-gm-fetch', (e) => {
+        const { id, url, method, headers } = e.detail;
+        GM_xmlhttpRequest({
+            method: method || 'GET',
+            url: url,
+            headers: headers || {},
+            onload: (res) => {
+                let data = null;
+                try { data = JSON.parse(res.responseText); } catch(err) {}
+                window.dispatchEvent(new CustomEvent('nsync-gm-response-' + id, {
+                    detail: {
+                        ok: res.status >= 200 && res.status < 300,
+                        status: res.status,
+                        text: res.responseText,
+                        json: data
+                    }
+                }));
+            },
+            onerror: (err) => {
+                window.dispatchEvent(new CustomEvent('nsync-gm-response-' + id, {
+                    detail: { error: true, text: err.error || 'Network Error' }
+                }));
+            }
+        });
+    });
 
+    // --- Inject Main Script into Page Context ---
+    const mainScript = function() {
+        'use strict';
     // ============================================================
     // === 設定 ===
     // 配信先URL（タグデータ）
@@ -29,6 +57,9 @@
     let currentSearch = '';
     let LIMIT = 80;
     let historyData = [];
+    
+    // タグ画像キャッシュ (セッション内のみ)
+    const tagImageCache = { danbooru: {}, e621: {} };
     
     // バッチ生成
     let batchRunning = false;
@@ -812,30 +843,22 @@
             </div>
             <div id="nsync-list-container"></div>
             <div id="nsync-footer">
-                <button class="nsync-page-btn" id="nsync-prev">◀ 前へ</button>
-                <span id="nsync-page-info">-</span>
-                <button class="nsync-page-btn" id="nsync-next">次へ ▶</button>
+                <button class="nsync-page-btn" id="nsync-prev">◀</button>
+                <span id="nsync-page-info">1 / 1</span>
+                <button class="nsync-page-btn" id="nsync-next">▶</button>
             </div>
-            <div id="nsync-batch-bar">
-                <div id="nsync-batch-row">
-                    <span id="nsync-batch-label">🔄 連続生成</span>
-                    <input id="nsync-batch-input" type="number" min="1" max="999" value="10" />
-                    <button id="nsync-batch-btn" class="start">▶ 開始</button>
-                    <span id="nsync-batch-progress"></span>
-                </div>
-            </div>
-            <div id="nsync-debug-bar" style="padding:6px 10px;border-top:1px solid #2a2a3a;display:flex;gap:6px;">
-                <button id="nsync-grid-btn" style="flex:1;background:#1a1025;border:1px solid #2d2040;color:#7a5fa8;padding:5px 8px;font-size:11px;border-radius:4px;cursor:pointer;font-weight:600;" title="セッション中に生成した画像をグリッドで一覧表示">🖼 グリッド表示</button>
-                <button id="nsync-backup-btn" style="flex:1;background:#1a1025;border:1px solid #2d2040;color:#7a5fa8;padding:5px 8px;font-size:11px;border-radius:4px;cursor:pointer;font-weight:600;" title="履歴のバックアップ/復元">💾 データ管理</button>
-                <!-- <button id="nsync-diagnose-btn" style="flex:1;background:#1e1e30;border:1px solid #3a3a5a;color:#888;padding:5px 8px;font-size:11px;border-radius:4px;cursor:pointer;" title="画面内のfile inputを全件調査してモバイル対応セレクタを特定します">🔍 診断</button> -->
+            <div style="padding:10px; border-top:1px solid #3d2960; text-align:center;">
+                <!-- 既存の「データ管理」ボタンを「設定 / データ」に変更 -->
+                <button id="nsync-backup-btn" style="width:100%;padding:10px;background:#6e40c9;color:#fff;border:none;border-radius:5px;cursor:pointer;margin-bottom:8px;">⚙ 設定 / データ</button>
+                
+                <!-- 既存機能 -->
+                <button id="nsync-grid-btn" style="width:100%;padding:10px;background:#2d2040;color:#c4a8e8;border:none;border-radius:5px;cursor:pointer;margin-bottom:8px;">🖼️ グリッド表示</button>
+                
+                <button id="nsync-batch-btn" style="width:100%;padding:10px;background:#1a1025;color:#c4a8e8;border:1px solid #3d2960;border-radius:5px;cursor:pointer;">
+                    ▶️ バッチ生成 (10回)
+                </button>
             </div>
         `;
-        document.body.appendChild(panel);
-
-        // トースト
-        const toast = document.createElement('div');
-        toast.id = 'nsync-toast';
-        document.body.appendChild(toast);
 
         // イベント設定
         panel.querySelector('#nsync-close').addEventListener('click', togglePanel);
@@ -882,13 +905,40 @@
             document.getElementById('nsync-overlay')?.remove();
             const overlay = document.createElement('div');
             overlay.id = 'nsync-overlay';
+            
+            const dbUser = localStorage.getItem('nsync-api-danbooru-user') || '';
+            const dbKey = localStorage.getItem('nsync-api-danbooru-key') || '';
+            const e6User = localStorage.getItem('nsync-api-e621-user') || '';
+            const e6Key = localStorage.getItem('nsync-api-e621-key') || '';
+
             overlay.innerHTML = `
-                <div id="nsync-detail-box" style="width:300px; padding:20px; text-align:center;">
-                    <h3 style="color:#9d7fd4;margin-top:0;">💾 ローカルデータ管理</h3>
-                    <p style="font-size:11px;color:#888;margin-bottom:20px;text-align:left;">
+                <div id="nsync-detail-box" style="width:320px; padding:20px; text-align:center;">
+                    <h3 style="color:#9d7fd4;margin-top:0;margin-bottom:15px;">⚙ 設定 / データ管理</h3>
+                    
+                    <!-- API設定 -->
+                    <div style="text-align:left; margin-bottom:15px; padding:10px; background:#1a1025; border:1px solid #2d2040; border-radius:6px;">
+                        <div style="color:#c4a8e8; font-size:12px; font-weight:bold; margin-bottom:8px;">Danbooru API連携</div>
+                        <input id="set-db-user" type="text" placeholder="Username (任意)" value="${esc(dbUser)}" style="width:100%; box-sizing:border-box; margin-bottom:6px; padding:6px; background:#0a0910; border:1px solid #3d2960; color:#fff; border-radius:4px; font-size:11px;">
+                        <input id="set-db-key" type="password" placeholder="API Key (任意)" value="${esc(dbKey)}" style="width:100%; box-sizing:border-box; padding:6px; background:#0a0910; border:1px solid #3d2960; color:#fff; border-radius:4px; font-size:11px;">
+                        <div style="font-size:9px; color:#7a5fa8; margin-top:4px;">※未入力でも動作しますが、設定すると制限が緩和されます。</div>
+                    </div>
+                    
+                    <div style="text-align:left; margin-bottom:15px; padding:10px; background:#1a1025; border:1px solid #2d2040; border-radius:6px;">
+                        <div style="color:#c4a8e8; font-size:12px; font-weight:bold; margin-bottom:8px;">e621 API連携</div>
+                        <input id="set-e6-user" type="text" placeholder="Username (任意 / User-Agent用)" value="${esc(e6User)}" style="width:100%; box-sizing:border-box; margin-bottom:6px; padding:6px; background:#0a0910; border:1px solid #3d2960; color:#fff; border-radius:4px; font-size:11px;">
+                        <input id="set-e6-key" type="password" placeholder="API Key (任意)" value="${esc(e6Key)}" style="width:100%; box-sizing:border-box; padding:6px; background:#0a0910; border:1px solid #3d2960; color:#fff; border-radius:4px; font-size:11px;">
+                    </div>
+                    
+                    <button id="nsync-save-settings" style="width:100%;padding:10px;margin-bottom:15px;background:#6e40c9;color:#fff;border:none;border-radius:5px;cursor:pointer;">⚙ 設定を保存する</button>
+
+                    <div style="border-top:1px solid #2d2040; margin:15px 0;"></div>
+                    
+                    <!-- バックアップ -->
+                    <h4 style="color:#9d7fd4;margin:0 0 10px 0;font-size:11px;text-align:left;">💾 ローカルデータ管理</h4>
+                    <p style="font-size:10px;color:#888;margin-bottom:15px;text-align:left;line-height:1.4;">
                         スマホ単独版では画像履歴はブラウザ内部に保存されます。キャッシュクリア等で消える前にZIP形式(JSON)でエクスポートして保護してください。
                     </p>
-                    <button id="nsync-do-export" style="width:100%;padding:10px;margin-bottom:10px;background:#6e40c9;color:#fff;border:none;border-radius:5px;cursor:pointer;">📥 バックアップをダウンロード</button>
+                    <button id="nsync-do-export" style="width:100%;padding:10px;margin-bottom:10px;background:#1a1025;color:#c4a8e8;border:1px solid #3d2960;border-radius:5px;cursor:pointer;">📥 バックアップをダウンロード</button>
                     
                     <div style="border-top:1px solid #2d2040; margin:15px 0;"></div>
                     
@@ -904,6 +954,15 @@
             `;
             document.body.appendChild(overlay);
             
+            // API設定の保存
+            document.getElementById('nsync-save-settings').addEventListener('click', () => {
+                localStorage.setItem('nsync-api-danbooru-user', document.getElementById('set-db-user').value.trim());
+                localStorage.setItem('nsync-api-danbooru-key', document.getElementById('set-db-key').value.trim());
+                localStorage.setItem('nsync-api-e621-user', document.getElementById('set-e6-user').value.trim());
+                localStorage.setItem('nsync-api-e621-key', document.getElementById('set-e6-key').value.trim());
+                showToast('API設定を保存しました', 'ok');
+            });
+
             document.getElementById('nsync-close-backup').addEventListener('click', () => overlay.remove());
             document.getElementById('nsync-do-export').addEventListener('click', () => LocalDB.exportData());
             document.getElementById('nsync-do-preview').addEventListener('change', (e) => {
@@ -1074,6 +1133,17 @@
             .nsync-ac-empty {
                 padding: 12px; text-align: center; color: #7a5fa8; font-size: 12px;
             }
+            .nsync-ac-tooltip {
+                position: fixed; z-index: 1000000;
+                background: #0a0910; border: 1px solid #3d2960; border-radius: 8px;
+                padding: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.9);
+                display: flex; gap: 6px; pointer-events: none;
+                opacity: 0; transition: opacity 0.2s;
+            }
+            .nsync-ac-tooltip img {
+                width: 96px; height: 96px; object-fit: cover; border-radius: 4px; border: 1px solid #2d2040;
+                background: #110d18;
+            }
         `;
         document.head.appendChild(style);
 
@@ -1098,6 +1168,9 @@
         });
     }
 
+    let _acDebounceTimer = null;
+    let _acLastQuery = '';
+
     async function handleAcInput(e) {
         if (typeof dpadInserting !== 'undefined' && dpadInserting) return;
         const pm = e.target && e.target.closest ? e.target.closest('.ProseMirror') : null;
@@ -1120,7 +1193,10 @@
         const regex = /^((?:[\{\[\(\s]*[\-－−‐]?[0-9.]+::)?[\{\[\(\s]*)(.*)$/;
         const match = currentWord.match(regex);
         const prefix = match ? match[1] : '';
-        const searchWord = match ? match[2] : currentWord;
+        let searchWord = match ? match[2] : currentWord;
+
+        // 末尾の :: や途中の :: を検索ワードから除去（強調構文内編集時の誤検索防止）
+        searchWord = searchWord.replace(/::/g, '').trim();
 
         if (searchWord.length >= 2 && searchWord.length <= 50) {
             const query = searchWord.replace(/ /g, '_').toLowerCase();
@@ -1146,13 +1222,77 @@
             acAbsStart = absOffset - currentWord.length;
             acAbsEnd = absOffset;
 
-            await fetchAndShowSuggestions(query);
+            // デバウンス + 同一クエリスキップで高速化・誤タップ防止
+            if (_acDebounceTimer) clearTimeout(_acDebounceTimer);
+            if (query === _acLastQuery && acPopup.style.display !== 'none') return;
+            _acDebounceTimer = setTimeout(async () => {
+                _acLastQuery = query;
+                await fetchAndShowSuggestions(query);
+            }, 120);
         } else {
             hideAutocomplete();
+        if (source === 'danbooru') {
+            const dbUser = localStorage.getItem('nsync-api-danbooru-user') || '';
+            const dbKey = localStorage.getItem('nsync-api-danbooru-key') || '';
+            url = `https://danbooru.donmai.us/posts.json?tags=${encodeURIComponent(tagName)}&limit=3`;
+            if (dbUser && dbKey) {
+                url += `&login=${encodeURIComponent(dbUser)}&api_key=${encodeURIComponent(dbKey)}`;
+            }
+            // CORS回避のためプロキシを経由 (Local版)
+            
+        } else if (source === 'e621') {
+            const e6User = localStorage.getItem('nsync-api-e621-user') || '';
+            const e6Key = localStorage.getItem('nsync-api-e621-key') || '';
+            url = `https://e621.net/posts.json?tags=${encodeURIComponent(tagName)}+order:score&limit=3`;
+            headers['User-Agent'] = `${e6User || 'NSyncUser'}/1.0`;
+            if (e6User && e6Key) {
+                headers['Authorization'] = 'Basic ' + btoa(`${e6User}:${e6Key}`);
+            }
+        }
+        
+        try {
+            
+            // use GM_xmlhttpRequest bridge
+            const res = await new Promise((resolve, reject) => {
+                const id = Math.random().toString(36).substr(2, 9);
+                const handler = (e) => {
+                    window.removeEventListener('nsync-gm-response-' + id, handler);
+                    if (e.detail.error) reject(new Error(e.detail.text));
+                    else resolve(e.detail);
+                };
+                window.addEventListener('nsync-gm-response-' + id, handler);
+                window.dispatchEvent(new CustomEvent('nsync-gm-fetch', { detail: { id, url, headers } }));
+            });
+
+            if (!res.ok) throw new Error('API error ' + res.status);
+            
+            let data = res.json;
+            if (!data) throw new Error('Invalid JSON format');
+            if (data.error) throw new Error(data.error || data.message);
+            
+            const urls = [];
+            if (source === 'danbooru') {
+                for (let p of data) {
+                    if (p.preview_file_url) urls.push(p.preview_file_url);
+                    else if (p.large_file_url) urls.push(p.large_file_url);
+                    else if (p.file_url) urls.push(p.file_url);
+                }
+            } else if (source === 'e621') {
+                const posts = data.posts || data;
+                for (let p of posts) {
+                    if (p.sample && p.sample.url) urls.push(p.sample.url);
+                    else if (p.file && p.file.url) urls.push(p.file.url);
+                }
+            }
+            
+            tagImageCache[source][tagName] = urls;
+            return { urls, error: null };
+        } catch (e) {
+            console.error('[N-Local] fetchTagImages error:', e);
+            return { urls: [], error: e.message };
         }
     }
 
-    
     async function fetchAndShowSuggestions(query) {
         try {
             const data = await LocalDB.searchTags(query, acSource);
@@ -1228,9 +1368,75 @@
 
                 div.innerHTML = `
                     <div style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dispName}</div>
-                    <span class="nsync-ac-count">${fmtCount}</span>
+                    <span class="nsync-ac-count nsync-ac-count-btn" style="cursor:pointer;" title="タップして上位画像を表示">${fmtCount}</span>
                     <a href="${wikiUrl}" target="_blank" class="nsync-ac-wiki" title="Wikiを開く">🌐</a>
                 `;
+                
+                const countSpan = div.querySelector('.nsync-ac-count-btn');
+                countSpan.dataset.tag = item.name;
+                countSpan.addEventListener('mousedown', e => e.stopPropagation());
+                countSpan.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    const tagName = countSpan.dataset.tag;
+                    
+                    let existing = document.querySelector('.nsync-ac-tooltip-popup');
+                    if (existing && existing.dataset.tag === tagName) {
+                        existing.remove();
+                        return;
+                    }
+                    
+                    document.querySelectorAll('.nsync-ac-tooltip-popup').forEach(el => el.remove());
+                    
+                    const origText = countSpan.textContent;
+                    countSpan.textContent = '⏳...';
+                    
+                    const result = await fetchTagImages(tagName, acSource);
+                    countSpan.textContent = origText;
+                    
+                    if (result.error) {
+                        showToast('取得エラー: ' + result.error, 'error');
+                        return;
+                    }
+                    if (result.urls.length === 0) {
+                        showToast('画像が見つかりませんでした', 'error');
+                        return;
+                    }
+                    
+                    const urls = result.urls;
+                    
+                    const tooltip = document.createElement('div');
+                    tooltip.className = 'nsync-ac-tooltip nsync-ac-tooltip-popup';
+                    tooltip.dataset.tag = tagName;
+                    
+                    urls.forEach(u => {
+                        const img = document.createElement('img');
+                        img.src = u;
+                        tooltip.appendChild(img);
+                    });
+                    
+                    document.body.appendChild(tooltip);
+                    
+                    // サジェストポップアップの上に表示
+                    const popupRect = acPopup.getBoundingClientRect();
+                    const ttW = tooltip.offsetWidth;
+                    const ttH = tooltip.offsetHeight;
+                    
+                    let leftPos = popupRect.left + (popupRect.width - ttW) / 2;
+                    let topPos = popupRect.top - ttH - 8;
+                    
+                    // 上に収まらない場合は下に表示
+                    if (topPos < 10) topPos = popupRect.bottom + 8;
+                    // 左右のはみ出し補正
+                    if (leftPos + ttW > window.innerWidth - 10) leftPos = window.innerWidth - ttW - 10;
+                    if (leftPos < 10) leftPos = 10;
+                    
+                    tooltip.style.left = leftPos + 'px';
+                    tooltip.style.top = topPos + 'px';
+                    
+                    requestAnimationFrame(() => {
+                        tooltip.style.opacity = '1';
+                    });
+                });
                 
                 // Wikiボタンのイベント停止
                 const wikiBtn = div.querySelector('.nsync-ac-wiki');
@@ -1252,8 +1458,9 @@
     }
 
     function hideAutocomplete() {
-        if (window._acSwitching) return; // トグル切り替え中は非表示にしない
+        if (window._acSwitching) return;
         if (acPopup) acPopup.style.display = 'none';
+        document.querySelectorAll('.nsync-ac-tooltip-popup').forEach(el => el.remove());
         acSuggestions = [];
         acSelectedIndex = -1;
     }
@@ -1506,8 +1713,19 @@
         }
 
         dpadPopup.style.display = 'block';
-        dpadPopup.style.left = `${Math.max(10, rect.left + rect.width / 2 - 60)}px`;
-        dpadPopup.style.top = `${rect.bottom + window.scrollY + 10}px`;
+        const dpadW = 128, dpadH = 128; // パッドのおおよそのサイズ
+        const dpadLeft = Math.max(10, Math.min(rect.left + rect.width / 2 - 60, window.innerWidth - dpadW - 10));
+        let dpadTop = rect.bottom + window.scrollY + 10;
+        // 画面下にはみ出す場合はテキストの上に表示
+        if (rect.bottom + dpadH + 20 > window.innerHeight) {
+            dpadTop = rect.top + window.scrollY - dpadH - 10;
+        }
+        // それでも画面上部からはみ出す場合は画面内に収める
+        if (dpadTop - window.scrollY < 0) {
+            dpadTop = window.scrollY + 10;
+        }
+        dpadPopup.style.left = `${dpadLeft}px`;
+        dpadPopup.style.top = `${dpadTop}px`;
     }
 
     function hideDpad() {
@@ -2917,7 +3135,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.14 Ready');
+            console.log('[N-Local] v1.1.25 Ready');
         }
 
         const t = setInterval(() => {
@@ -2930,4 +3148,11 @@
 
     init();
 
+
+    
+    };
+
+    const scriptEl = document.createElement('script');
+    scriptEl.textContent = '(' + mainScript.toString() + ')();\n//# sourceURL=NovelAI_Local_Injected.js';
+    document.head.appendChild(scriptEl);
 })();
