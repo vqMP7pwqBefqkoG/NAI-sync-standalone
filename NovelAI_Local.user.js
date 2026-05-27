@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.26
+// @version      1.1.27
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -854,6 +854,9 @@
                 <!-- 既存機能 -->
                 <button id="nsync-grid-btn" style="width:100%;padding:10px;background:#2d2040;color:#c4a8e8;border:none;border-radius:5px;cursor:pointer;margin-bottom:8px;">🖼️ グリッド表示</button>
                 
+                <!-- 一括置換機能 -->
+                <button id="nsync-replace-btn" style="width:100%;padding:10px;background:#2d2040;color:#c4a8e8;border:none;border-radius:5px;cursor:pointer;margin-bottom:8px;">🔍 一括置換</button>
+                
                 <button id="nsync-batch-btn" style="width:100%;padding:10px;background:#1a1025;color:#c4a8e8;border:1px solid #3d2960;border-radius:5px;cursor:pointer;">
                     ▶️ バッチ生成 (10回)
                 </button>
@@ -983,6 +986,118 @@
         });
 
         
+        // 一括置換機能
+        panel.querySelector('#nsync-replace-btn').addEventListener('click', () => {
+            document.getElementById('nsync-overlay')?.remove();
+            const overlay = document.createElement('div');
+            overlay.id = 'nsync-overlay';
+            overlay.innerHTML = `
+                <div id="nsync-detail-box" style="width:320px; padding:20px; text-align:center;">
+                    <h3 style="color:#9d7fd4;margin-top:0;">🔍 一括置換</h3>
+                    <div style="text-align:left; font-size:12px; color:#c4a8e8; margin-bottom:15px;">
+                        <label style="display:block; margin-bottom:5px;"><input type="checkbox" id="nsync-rep-main" checked> メインプロンプト</label>
+                        <label style="display:block; margin-bottom:5px;"><input type="checkbox" id="nsync-rep-neg" checked> ネガティブプロンプト</label>
+                        <label style="display:block;"><input type="checkbox" id="nsync-rep-char" checked> キャラクタープロンプト</label>
+                    </div>
+                    <div style="margin-bottom:10px;">
+                        <input type="text" id="nsync-rep-search" placeholder="検索ワード (大文字小文字区別)" style="width:100%; padding:8px; box-sizing:border-box; background:#1a1025; color:#fff; border:1px solid #3d2960; border-radius:4px; margin-bottom:10px;">
+                        <input type="text" id="nsync-rep-target" placeholder="置換ワード" style="width:100%; padding:8px; box-sizing:border-box; background:#1a1025; color:#fff; border:1px solid #3d2960; border-radius:4px;">
+                    </div>
+                    <button id="nsync-do-replace" style="width:100%;padding:10px;margin-bottom:10px;background:#6e40c9;color:#fff;border:none;border-radius:5px;cursor:pointer;">✅ 置換を実行</button>
+                    <button id="nsync-close-replace" style="background:none;border:none;color:#888;cursor:pointer;">閉じる</button>
+                    <div style="margin-top:10px; font-size:11px; color:#888; text-align:left;">
+                        ※キャラクタープロンプトが閉じている場合は自動で展開して置換を試みます。
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(overlay);
+
+            document.getElementById('nsync-close-replace').addEventListener('click', () => overlay.remove());
+            document.getElementById('nsync-do-replace').addEventListener('click', async () => {
+                const doMain = document.getElementById('nsync-rep-main').checked;
+                const doNeg = document.getElementById('nsync-rep-neg').checked;
+                const doChar = document.getElementById('nsync-rep-char').checked;
+                const searchStr = document.getElementById('nsync-rep-search').value;
+                const targetStr = document.getElementById('nsync-rep-target').value;
+
+                if (!searchStr) {
+                    showToast('検索ワードを入力してください', 'error');
+                    return;
+                }
+
+                if (doChar) {
+                    const firstPm = document.querySelector('.ProseMirror');
+                    if (firstPm) {
+                        let container = firstPm;
+                        for (let i = 0; i < 6; i++) {
+                            if (container.parentElement) container = container.parentElement;
+                        }
+                        const iter = document.createNodeIterator(container, NodeFilter.SHOW_TEXT);
+                        let node;
+                        while ((node = iter.nextNode())) {
+                            if (node.nodeValue.includes(searchStr)) {
+                                let el = node.parentElement;
+                                if (el && !el.closest('.ProseMirror') && !el.closest('#nsync-panel') && !el.closest('#nsync-overlay')) {
+                                    el.click();
+                                    if (el.parentElement) el.parentElement.click();
+                                }
+                            }
+                        }
+                        await new Promise(r => setTimeout(r, 200));
+                    }
+                }
+
+                const pms = Array.from(document.querySelectorAll('.ProseMirror'));
+                let replacedCount = 0;
+
+                for (let i = 0; i < pms.length; i++) {
+                    const pm = pms[i];
+                    
+                    let type = 'char';
+                    if (i === 0) {
+                        type = 'main';
+                    } else {
+                        let parent = pm.parentElement;
+                        let isNeg = false;
+                        for(let j=0; j<5; j++) {
+                            if (parent && parent.innerText && parent.innerText.includes('Undesired Content')) {
+                                isNeg = true; break;
+                            }
+                            if (parent) parent = parent.parentElement;
+                        }
+                        if (isNeg || i === 1) {
+                            type = 'neg';
+                        }
+                    }
+
+                    if (type === 'main' && !doMain) continue;
+                    if (type === 'neg' && !doNeg) continue;
+                    if (type === 'char' && !doChar) continue;
+
+                    const fullText = pm.innerText;
+                    if (fullText.includes(searchStr)) {
+                        pm.focus();
+                        const range = document.createRange();
+                        range.selectNodeContents(pm);
+                        const sel = window.getSelection();
+                        sel.removeAllRanges();
+                        sel.addRange(range);
+                        
+                        const newText = fullText.split(searchStr).join(targetStr);
+                        document.execCommand('insertText', false, newText);
+                        replacedCount++;
+                    }
+                }
+
+                overlay.remove();
+                if (replacedCount > 0) {
+                    showToast(`${replacedCount}箇所のプロンプト枠で置換しました`, 'ok');
+                } else {
+                    showToast('対象のワードが見つかりませんでした', 'error');
+                }
+            });
+        });
+
         // オートコンプリート初期化
         initAutocomplete();
         // 十字キーUI初期化
