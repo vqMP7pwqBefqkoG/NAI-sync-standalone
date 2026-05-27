@@ -1537,6 +1537,18 @@
             }, 120);
         } else {
             hideAutocomplete();
+        }
+    }
+
+    async function fetchTagImages(tagName, source) {
+        if (!tagName) return { urls: [], error: null };
+        if (tagImageCache[source] && tagImageCache[source][tagName]) {
+            return { urls: tagImageCache[source][tagName], error: null };
+        }
+        
+        let url = '';
+        let headers = {};
+        
         if (source === 'danbooru') {
             const dbUser = localStorage.getItem('nsync-api-danbooru-user') || '';
             const dbKey = localStorage.getItem('nsync-api-danbooru-key') || '';
