@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.41
+// @version      1.1.43
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -431,23 +431,46 @@
 
         /* ─── メインパネル ─── */
         #nsync-panel {
-            position:fixed; top:0; right:-55vw;
-            width:min(340px,50vw);
+            position:fixed; top:0; right:0;
+            width:min(var(--nsync-panel-width, 340px), 92vw);
+            min-width:min(260px, 90vw);
+            max-width:92vw;
             height:100vh; height:100dvh; z-index:99999;
             background:#12101a;
             border-left:1px solid #2d2040;
             display:flex; flex-direction:column;
-            transition:right 0.3s cubic-bezier(0.4,0,0.2,1);
+            transform:translateX(100%);
+            transition:transform 0.3s cubic-bezier(0.4,0,0.2,1);
+            pointer-events:none;
             box-shadow:-6px 0 24px rgba(0,0,0,0.7);
             font-family:'Segoe UI','Hiragino Sans',sans-serif;
         }
-        #nsync-panel.open { right:0; }
+        #nsync-panel.open { transform:translateX(0); pointer-events:auto; }
 
         /* スマホ: 画面幋50%の右半分に和える */
         @media (max-width:768px) {
-            #nsync-panel { width:50vw; right:-50vw; }
-            #nsync-panel.open { right:0; }
+            #nsync-panel { width:min(var(--nsync-panel-width, 340px), 92vw); }
             #nsync-tab { font-size:11px; padding:12px 6px; }
+        }
+        #nsync-panel-resize {
+            position:fixed; top:0; right:calc(min(var(--nsync-panel-width, 340px), 92vw) - 9px);
+            width:22px; height:100vh; height:100dvh;
+            cursor:ew-resize; touch-action:none; z-index:100000;
+            display:flex; align-items:center; justify-content:center;
+            opacity:0; pointer-events:none;
+        }
+        #nsync-panel-resize::after {
+            content:''; width:4px; height:54px; border-radius:999px;
+            background:rgba(157,127,212,0.42);
+            box-shadow:0 0 10px rgba(0,0,0,0.45);
+            transition:background 0.2s, height 0.2s;
+        }
+        #nsync-panel.open ~ #nsync-panel-resize {
+            opacity:1; pointer-events:auto;
+        }
+        #nsync-panel-resize:hover::after,
+        #nsync-panel-resize.resizing::after {
+            height:86px; background:rgba(196,168,232,0.78);
         }
 
         /* ─── ヘッダー ─── */
@@ -727,7 +750,7 @@
         #nsync-toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
 
         /* セッションフォルダグリッド */
-        .nsync-session-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 14px; }
+        .nsync-session-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 10px; padding: 14px; }
         .nsync-folder { background: #1a1025; border: 1px solid #2d2040; border-radius: 8px; cursor: pointer; overflow: hidden; transition: all 0.2s; display: flex; flex-direction: column; }
         .nsync-folder:hover { border-color: #7a5fa8; background: #231535; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
         .nsync-folder-thumbs { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; aspect-ratio: 1; background: #0e0c16; gap: 1px; }
@@ -742,8 +765,7 @@
         .nsync-detail-grid-header { padding: 10px 14px; background: #1a1025; border-bottom: 1px solid #2d2040; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
         .nsync-back-btn { background: #2d2040; border: none; color: #c4a8e8; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; transition: background 0.2s; font-family:'Segoe UI',sans-serif; }
         .nsync-back-btn:hover { background: #3d2960; color: #fff; }
-        .nsync-detail-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; padding: 10px; }
-        @media (min-width: 600px) { .nsync-detail-grid { grid-template-columns: repeat(4, 1fr); } }
+        .nsync-detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 6px; padding: 10px; }
         .nsync-detail-item { position: relative; aspect-ratio: 1; border-radius: 6px; overflow: hidden; cursor: pointer; background: #0e0c16; border: 1px solid #2d2040; transition: border-color 0.2s; }
         .nsync-detail-item:hover { border-color: #6e40c9; }
         .nsync-detail-item img { width: 100%; height: 100%; object-fit: contain; display: block; }
@@ -864,6 +886,7 @@
         `;
 
         document.body.appendChild(panel);
+        initPanelResize(panel);
 
         // トースト
         const toast = document.createElement('div');
@@ -3452,6 +3475,69 @@
     // ============================================================
     // === 初期化 ===
     // ============================================================
+    function initPanelResize(panel) {
+        if (!panel || document.getElementById('nsync-panel-resize')) return;
+
+        const savedWidth = parseInt(localStorage.getItem('nsync-history-panel-width') || '', 10);
+        const clampWidth = (width) => {
+            const max = Math.max(260, Math.floor(window.innerWidth * 0.92));
+            const min = Math.min(260, max);
+            return Math.max(min, Math.min(max, Math.round(width)));
+        };
+        const applyWidth = (width) => {
+            const next = clampWidth(width);
+            panel.style.width = `${next}px`;
+            panel.style.setProperty('--nsync-panel-width', `${next}px`);
+            document.documentElement.style.setProperty('--nsync-panel-width', `${next}px`);
+            return next;
+        };
+
+        if (savedWidth) applyWidth(savedWidth);
+
+        const handle = document.createElement('div');
+        handle.id = 'nsync-panel-resize';
+        handle.title = 'ドラッグして履歴パネルの幅を変更';
+        panel.insertAdjacentElement('afterend', handle);
+
+        let pointerId = null;
+        let startX = 0;
+        let startWidth = 0;
+
+        const finish = () => {
+            if (pointerId === null) return;
+            pointerId = null;
+            panel.classList.remove('resizing');
+            handle.classList.remove('resizing');
+            document.body.style.userSelect = '';
+            document.body.style.cursor = '';
+            localStorage.setItem('nsync-history-panel-width', `${panel.offsetWidth}px`);
+        };
+
+        handle.addEventListener('pointerdown', (e) => {
+            pointerId = e.pointerId;
+            startX = e.clientX;
+            startWidth = panel.offsetWidth;
+            panel.classList.add('resizing');
+            handle.classList.add('resizing');
+            document.body.style.userSelect = 'none';
+            document.body.style.cursor = 'ew-resize';
+            handle.setPointerCapture(e.pointerId);
+            e.preventDefault();
+            e.stopPropagation();
+        });
+
+        handle.addEventListener('pointermove', (e) => {
+            if (pointerId !== e.pointerId) return;
+            applyWidth(startWidth + (startX - e.clientX));
+            e.preventDefault();
+        });
+        handle.addEventListener('pointerup', finish);
+        handle.addEventListener('pointercancel', finish);
+        window.addEventListener('resize', () => {
+            if (panel.style.width) applyWidth(panel.offsetWidth);
+        });
+    }
+
     function init() {
         injectStyles();
 
@@ -3472,7 +3558,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.25 Ready');
+            console.log('[N-Local] v1.1.43 Ready');
         }
 
         const t = setInterval(() => {
