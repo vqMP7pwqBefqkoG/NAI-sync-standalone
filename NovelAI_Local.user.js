@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.38
+// @version      1.1.39
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1364,6 +1364,14 @@
                 align-items: center; font-size: 13px; border-bottom: 1px solid #1a1025; font-family: monospace;
             }
             .nsync-ac-item.selected, .nsync-ac-item:hover { background: #2d2040; }
+            .nsync-ac-item.nsync-ac-favorite {
+                background: #fff9c4;
+                color: #5d4e00;
+            }
+            .nsync-ac-item.nsync-ac-favorite:hover,
+            .nsync-ac-item.nsync-ac-favorite.selected {
+                background: #fff59d;
+            }
             .nsync-ac-cat-0 { color: #d1c4e9; } /* General */
             .nsync-ac-cat-1 { color: #ff8a65; } /* Artist */
             .nsync-ac-cat-3 { color: #f06292; } /* Copyright */
@@ -1662,7 +1670,7 @@
         } else {
             items.forEach((item, idx) => {
                 const div = document.createElement('div');
-                div.className = `nsync-ac-item nsync-ac-cat-${item.category}`;
+                div.className = `nsync-ac-item nsync-ac-cat-${item.category}${isFavoriteTag(item.name) ? " nsync-ac-favorite" : ""}`;
                 if (idx === 0) div.classList.add('selected');
                 
                 let fmtCount = item.post_count;
