@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.46
+// @version      1.1.47
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1424,7 +1424,13 @@
             .nsync-ac-cat-4 { color: #81c784; } /* Character */
             .nsync-ac-cat-5 { color: #f48fb1; } /* Species (e621) / Meta */
             .nsync-ac-cat-8 { color: #81c784; } /* Lore (e621) */
-            .nsync-ac-count { color: #7a5fa8; font-size: 11px; margin-left: auto; margin-right: 8px; }
+            .nsync-ac-count { color: #7a5fa8; font-size: 11px; margin-left: auto; margin-right: 6px; }
+            .nsync-ac-count-btn {
+                min-width: 52px; padding: 6px 8px; border-radius: 999px;
+                background: rgba(45,32,64,0.7); border: 1px solid rgba(122,95,168,0.55);
+                text-align: center; line-height: 1; touch-action: manipulation;
+            }
+            .nsync-ac-count-btn:active { background: rgba(110,64,201,0.65); color: #fff; }
             .nsync-ac-wiki {
                 text-decoration: none; font-size: 14px; opacity: 0.6; transition: opacity 0.2s;
             }
@@ -1436,13 +1442,19 @@
                 position: fixed; z-index: 1000000;
                 background: #0a0910; border: 1px solid #3d2960; border-radius: 8px;
                 padding: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.9);
-                display: flex; flex-wrap: wrap; gap: 6px; pointer-events: none;
+                display: flex; gap: 6px; pointer-events: auto;
+                overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
                 max-width: min(520px, calc(100vw - 20px));
                 opacity: 0; transition: opacity 0.2s;
+            }
+            .nsync-ac-tooltip-loading {
+                min-width: 180px; min-height: 64px; align-items: center; justify-content: center;
+                color: #c4a8e8; font-size: 12px;
             }
             .nsync-ac-tooltip img {
                 width: 96px; height: 96px; object-fit: cover; border-radius: 4px; border: 1px solid #2d2040;
                 background: #110d18;
+                flex: 0 0 auto;
             }
         `;
         document.head.appendChild(style);
@@ -1675,6 +1687,26 @@
         }
     }
 
+    function positionTagPreview(tooltip) {
+        if (!tooltip || !acPopup) return;
+
+        const margin = 10;
+        const popupRect = acPopup.getBoundingClientRect();
+        const ttW = Math.min(tooltip.offsetWidth || 220, window.innerWidth - margin * 2);
+        const ttH = tooltip.offsetHeight || 82;
+
+        let leftPos = popupRect.left + (popupRect.width - ttW) / 2;
+        let topPos = popupRect.top - ttH - 8;
+
+        if (topPos < margin) topPos = popupRect.bottom + 8;
+        if (leftPos + ttW > window.innerWidth - margin) leftPos = window.innerWidth - ttW - margin;
+        if (leftPos < margin) leftPos = margin;
+
+        tooltip.style.left = `${leftPos}px`;
+        tooltip.style.top = `${topPos}px`;
+        tooltip.style.maxWidth = `${window.innerWidth - margin * 2}px`;
+    }
+
     function showAutocomplete(items, query) {
         // お気に入りタグを上位にソート（3回以上選択されたものを優先）
         const counts = JSON.parse(localStorage.getItem('nsync-tag-favorites') || "{}");
@@ -1777,6 +1809,16 @@
                     }
                     
                     document.querySelectorAll('.nsync-ac-tooltip-popup').forEach(el => el.remove());
+
+                    const tooltip = document.createElement('div');
+                    tooltip.className = 'nsync-ac-tooltip nsync-ac-tooltip-popup nsync-ac-tooltip-loading';
+                    tooltip.dataset.tag = tagName;
+                    tooltip.textContent = '画像を読み込み中...';
+                    document.body.appendChild(tooltip);
+                    positionTagPreview(tooltip);
+                    requestAnimationFrame(() => {
+                        tooltip.style.opacity = '1';
+                    });
                     
                     const origText = countSpan.textContent;
                     countSpan.textContent = '⏳...';
@@ -1794,10 +1836,8 @@
                     }
                     
                     const urls = result.urls;
-                    
-                    const tooltip = document.createElement('div');
                     tooltip.className = 'nsync-ac-tooltip nsync-ac-tooltip-popup';
-                    tooltip.dataset.tag = tagName;
+                    tooltip.textContent = '';
                     
                     urls.forEach(u => {
                         const img = document.createElement('img');
@@ -1805,9 +1845,10 @@
                         tooltip.appendChild(img);
                     });
                     
-                    document.body.appendChild(tooltip);
+                    if (!tooltip.isConnected) document.body.appendChild(tooltip);
                     
                     // サジェストポップアップの上に表示
+                    /*
                     const popupRect = acPopup.getBoundingClientRect();
                     const ttW = tooltip.offsetWidth;
                     const ttH = tooltip.offsetHeight;
@@ -1827,6 +1868,8 @@
                     requestAnimationFrame(() => {
                         tooltip.style.opacity = '1';
                     });
+                    */
+                    positionTagPreview(tooltip);
                 });
                 
                 // Wikiボタンのイベント停止
@@ -3589,7 +3632,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.46 Ready');
+            console.log('[N-Local] v1.1.47 Ready');
         }
 
         const t = setInterval(() => {
