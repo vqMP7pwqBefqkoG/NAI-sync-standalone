@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.44
+// @version      1.1.45
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
 // @grant        GM_xmlhttpRequest
+// @connect      danbooru.donmai.us
+// @connect      e621.net
 // @updateURL    https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/NovelAI_Local.user.js
 // @downloadURL  https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/NovelAI_Local.user.js
 // ==/UserScript==
@@ -1434,7 +1436,8 @@
                 position: fixed; z-index: 1000000;
                 background: #0a0910; border: 1px solid #3d2960; border-radius: 8px;
                 padding: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.9);
-                display: flex; gap: 6px; pointer-events: none;
+                display: flex; flex-wrap: wrap; gap: 6px; pointer-events: none;
+                max-width: min(520px, calc(100vw - 20px));
                 opacity: 0; transition: opacity 0.2s;
             }
             .nsync-ac-tooltip img {
@@ -1580,24 +1583,36 @@
         
         let url = '';
         let headers = {};
+        const limit = 5;
         
         if (source === 'danbooru') {
             const dbUser = localStorage.getItem('nsync-api-danbooru-user') || '';
             const dbKey = localStorage.getItem('nsync-api-danbooru-key') || '';
-            url = `https://danbooru.donmai.us/posts.json?tags=${encodeURIComponent(tagName)}&limit=3`;
+            const params = new URLSearchParams({
+                tags: `${tagName} order:score`,
+                limit: String(limit)
+            });
             if (dbUser && dbKey) {
-                url += `&login=${encodeURIComponent(dbUser)}&api_key=${encodeURIComponent(dbKey)}`;
+                params.set('login', dbUser);
+                params.set('api_key', dbKey);
             }
+            url = `https://danbooru.donmai.us/posts.json?${params.toString()}`;
             // CORS回避のためプロキシを経由 (Local版)
             
         } else if (source === 'e621') {
             const e6User = localStorage.getItem('nsync-api-e621-user') || '';
             const e6Key = localStorage.getItem('nsync-api-e621-key') || '';
-            url = `https://e621.net/posts.json?tags=${encodeURIComponent(tagName)}+order:score&limit=3`;
-            headers['User-Agent'] = `${e6User || 'NSyncUser'}/1.0`;
+            const params = new URLSearchParams({
+                tags: `${tagName} order:score`,
+                limit: String(limit)
+            });
+            url = `https://e621.net/posts.json?${params.toString()}`;
+            headers['User-Agent'] = `${e6User || 'NSyncUser'}/1.0 (NovelAI Local Panel)`;
             if (e6User && e6Key) {
                 headers['Authorization'] = 'Basic ' + btoa(`${e6User}:${e6Key}`);
             }
+        } else {
+            return { urls: [], error: 'Unknown source' };
         }
         
         try {
@@ -1623,14 +1638,21 @@
             const urls = [];
             if (source === 'danbooru') {
                 for (let p of data) {
-                    if (p.preview_file_url) urls.push(p.preview_file_url);
-                    else if (p.large_file_url) urls.push(p.large_file_url);
-                    else if (p.file_url) urls.push(p.file_url);
+                    const variants = (p.media_asset && Array.isArray(p.media_asset.variants)) ? p.media_asset.variants : [];
+                    const picked =
+                        variants.find(v => v.type === '180x180' && v.url) ||
+                        variants.find(v => v.type === '360x360' && v.url) ||
+                        variants.find(v => v.type === 'sample' && v.url);
+                    let imgUrl = picked && picked.url;
+                    if (!imgUrl) imgUrl = p.preview_file_url || p.large_file_url || p.file_url;
+                    if (imgUrl && imgUrl.startsWith('/')) imgUrl = 'https://danbooru.donmai.us' + imgUrl;
+                    if (imgUrl) urls.push(imgUrl);
                 }
             } else if (source === 'e621') {
                 const posts = data.posts || data;
                 for (let p of posts) {
-                    if (p.sample && p.sample.url) urls.push(p.sample.url);
+                    if (p.preview && p.preview.url) urls.push(p.preview.url);
+                    else if (p.sample && p.sample.url) urls.push(p.sample.url);
                     else if (p.file && p.file.url) urls.push(p.file.url);
                 }
             }
@@ -3558,7 +3580,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.44 Ready');
+            console.log('[N-Local] v1.1.45 Ready');
         }
 
         const t = setInterval(() => {
