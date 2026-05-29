@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.45
+// @version      1.1.46
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1489,6 +1489,7 @@
                 const active = document.activeElement;
                 const inPm = active && active.closest && active.closest('.ProseMirror');
                 const inAc = acPopup && acPopup.contains(active);
+                if (window._acPreviewInteracting) return;
                 if (!inPm && !inAc) {
                     hideAutocomplete();
                 }
@@ -1756,15 +1757,23 @@
                 
                 const countSpan = div.querySelector('.nsync-ac-count-btn');
                 countSpan.dataset.tag = item.name;
-                countSpan.addEventListener('mousedown', e => e.stopPropagation());
+                const keepAutocompleteOpen = (e) => {
+                    window._acPreviewInteracting = true;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setTimeout(() => { window._acPreviewInteracting = false; }, 500);
+                };
+                countSpan.addEventListener('pointerdown', keepAutocompleteOpen);
+                countSpan.addEventListener('mousedown', keepAutocompleteOpen);
+                countSpan.addEventListener('touchstart', keepAutocompleteOpen, { passive: false });
                 countSpan.addEventListener('click', async (e) => {
+                    keepAutocompleteOpen(e);
                     e.stopPropagation();
                     const tagName = countSpan.dataset.tag;
                     
                     let existing = document.querySelector('.nsync-ac-tooltip-popup');
                     if (existing && existing.dataset.tag === tagName) {
                         existing.remove();
-                        return;
                     }
                     
                     document.querySelectorAll('.nsync-ac-tooltip-popup').forEach(el => el.remove());
@@ -3580,7 +3589,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.45 Ready');
+            console.log('[N-Local] v1.1.46 Ready');
         }
 
         const t = setInterval(() => {
