@@ -1601,6 +1601,16 @@
     }
 
     function showAutocomplete(items, query) {
+        // お気に入りタグを上位にソート（3回以上選択されたものを優先）
+        const counts = JSON.parse(localStorage.getItem('nsync-tag-favorites') || "{}");
+        items.sort((a, b) => {
+            const ca = counts[a.name] || 0;
+            const cb = counts[b.name] || 0;
+            if (ca >= 3 && cb < 3) return -1;
+            if (cb >= 3 && ca < 3) return 1;
+            if (ca !== cb) return cb - ca;
+            return 0;
+        });
         acSuggestions = items;
         acSelectedIndex = 0;
         acPopup.innerHTML = '';
