@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.39
+// @version      1.1.40
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1330,6 +1330,27 @@
     let acAbsStart = 0;
     let acAbsEnd = 0;
     let acSource = localStorage.getItem('nsync-tag-source') || 'danbooru'; // 'danbooru' or 'e621'
+    
+    // ============================================================
+    // === お気に入りタグ（選択回数管理） ===
+    // ============================================================
+    const FAVORITE_KEY = 'nsync-tag-favorites';
+    function getFavoriteCounts() {
+        try {
+            return JSON.parse(localStorage.getItem(FAVORITE_KEY) || '{}');
+        } catch {
+            return {};
+        }
+    }
+    function incrementTagSelection(tagName) {
+        const counts = getFavoriteCounts();
+        counts[tagName] = (counts[tagName] || 0) + 1;
+        localStorage.setItem(FAVORITE_KEY, JSON.stringify(counts));
+    }
+    function isFavoriteTag(tagName) {
+        const counts = getFavoriteCounts();
+        return (counts[tagName] || 0) >= 3;
+    }
 
     function initAutocomplete() {
         const style = document.createElement('style');
