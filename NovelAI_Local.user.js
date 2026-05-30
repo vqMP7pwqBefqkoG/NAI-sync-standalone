@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.53
+// @version      1.1.54
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -437,7 +437,7 @@
             width:min(var(--nsync-panel-width, 340px), 92vw);
             min-width:min(260px, 90vw);
             max-width:92vw;
-            height:100vh; z-index:99999;
+            height:var(--nsync-panel-height, 100dvh); z-index:99999;
             background:#12101a;
             border-left:1px solid #2d2040;
             display:flex; flex-direction:column;
@@ -456,7 +456,7 @@
         }
         #nsync-panel-resize {
             position:fixed; top:0; right:calc(min(var(--nsync-panel-width, 340px), 92vw) - 9px);
-            width:22px; height:100vh;
+            width:22px; height:var(--nsync-panel-height, 100dvh);
             cursor:ew-resize; touch-action:none; z-index:100000;
             display:flex; align-items:center; justify-content:center;
             opacity:0; pointer-events:none;
@@ -781,6 +781,44 @@
     // ============================================================
     // === UI 構築 ===
     // ============================================================
+    let nsyncPanelStableHeight = 0;
+
+    function getNsyncViewportHeight() {
+        const vv = window.visualViewport;
+        return Math.round(vv ? vv.height : window.innerHeight);
+    }
+
+    function isNsyncKeyboardViewport(height) {
+        const active = document.activeElement;
+        const inPanelInput = !!(active && active.closest && active.closest('#nsync-panel') && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName));
+        const inPromptEditor = !!(active && active.closest && active.closest('.ProseMirror'));
+        const editing = inPanelInput || inPromptEditor;
+        return !!(window.visualViewport && editing && nsyncPanelStableHeight && height < nsyncPanelStableHeight * 0.85);
+    }
+
+    function applyNsyncPanelHeight(force = false) {
+        const height = getNsyncViewportHeight();
+        if (!height) return;
+
+        const keyboardOpen = isNsyncKeyboardViewport(height);
+        if (force || !keyboardOpen || !nsyncPanelStableHeight) {
+            nsyncPanelStableHeight = height;
+        }
+
+        const panelHeight = keyboardOpen ? nsyncPanelStableHeight : height;
+        document.documentElement.style.setProperty('--nsync-panel-height', panelHeight + 'px');
+    }
+
+    function initNsyncPanelHeightLock() {
+        applyNsyncPanelHeight(true);
+
+        window.addEventListener('resize', () => applyNsyncPanelHeight(false), { passive: true });
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', () => applyNsyncPanelHeight(false), { passive: true });
+            window.visualViewport.addEventListener('scroll', () => applyNsyncPanelHeight(false), { passive: true });
+        }
+    }
+
     function buildUI() {
         if (document.getElementById('nsync-panel')) return;
 
@@ -3677,6 +3715,7 @@
 
     function init() {
         injectStyles();
+        initNsyncPanelHeightLock();
 
         // 起動確認バッジ（15秒後に消える）
         const marker = document.createElement('div');
@@ -3695,7 +3734,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.53 Ready');
+            console.log('[N-Local] v1.1.54 Ready');
         }
 
         const t = setInterval(() => {
