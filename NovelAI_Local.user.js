@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.50
+// @version      1.1.51
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1989,7 +1989,20 @@
     let dpadEndIndex = 0;
     let dpadActiveNode = null;
     let dpadTimer = null;
+    let dpadViewportTimer = null;
+    let dpadPlaceToken = 0;
     let dpadInserting = false;
+
+    function isMobileDpadViewport() {
+        return !!window.visualViewport && (window.innerWidth <= 768 || window.matchMedia('(pointer: coarse)').matches);
+    }
+
+    function scheduleDpadViewportRefresh() {
+        if (!dpadPopup || dpadPopup.style.display === 'none') return;
+        dpadPopup.style.visibility = 'hidden';
+        clearTimeout(dpadViewportTimer);
+        dpadViewportTimer = setTimeout(() => updateDpadView(), 180);
+    }
 
     function initDpad() {
         const style = document.createElement('style');
@@ -2064,6 +2077,11 @@
                 }
             }
         });
+
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', scheduleDpadViewportRefresh);
+            window.visualViewport.addEventListener('scroll', scheduleDpadViewportRefresh);
+        }
     }
 
     function handleSelectionChange() {
@@ -2115,7 +2133,7 @@
             }
             
             updateDpadView();
-        }, 300);
+        }, isMobileDpadViewport() ? 650 : 300);
     }
 
     function updateDpadView() {
@@ -2129,6 +2147,8 @@
         }
 
         const range = getAbsoluteRange(dpadActiveNode, dpadStartIndex, dpadEndIndex);
+        const token = ++dpadPlaceToken;
+        const deferReveal = isMobileDpadViewport();
 
         dpadHighlightOverlay.innerHTML = '';
         const rects = range.getClientRects();
@@ -2148,7 +2168,9 @@
             dpadHighlightOverlay.appendChild(hl);
         }
 
-        const placeDpad = () => {
+        const placeDpad = (reveal) => {
+            if (token !== dpadPlaceToken) return;
+
             const rect = range.getBoundingClientRect();
             if (rect.width === 0 && rect.height === 0) {
                 dpadHighlightOverlay.innerHTML = '';
@@ -2187,15 +2209,24 @@
 
             dpadPopup.style.left = `${left}px`;
             dpadPopup.style.top = `${top}px`;
-            dpadPopup.style.visibility = 'visible';
+            dpadPopup.style.visibility = reveal ? 'visible' : 'hidden';
         };
 
-        placeDpad();
-        requestAnimationFrame(placeDpad);
+        placeDpad(!deferReveal);
+        requestAnimationFrame(() => placeDpad(!deferReveal));
+        if (deferReveal) {
+            setTimeout(() => placeDpad(false), 180);
+            setTimeout(() => placeDpad(true), 420);
+        }
     }
 
     function hideDpad() {
-        if (dpadPopup) dpadPopup.style.display = 'none';
+        dpadPlaceToken++;
+        clearTimeout(dpadViewportTimer);
+        if (dpadPopup) {
+            dpadPopup.style.display = 'none';
+            dpadPopup.style.visibility = 'visible';
+        }
         if (dpadHighlightOverlay) dpadHighlightOverlay.innerHTML = '';
     }
 
@@ -3664,7 +3695,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.50 Ready');
+            console.log('[N-Local] v1.1.51 Ready');
         }
 
         const t = setInterval(() => {
