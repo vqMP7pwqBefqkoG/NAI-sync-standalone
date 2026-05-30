@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.52
+// @version      1.1.53
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -437,7 +437,7 @@
             width:min(var(--nsync-panel-width, 340px), 92vw);
             min-width:min(260px, 90vw);
             max-width:92vw;
-            height:100vh; height:100dvh; z-index:99999;
+            height:100vh; z-index:99999;
             background:#12101a;
             border-left:1px solid #2d2040;
             display:flex; flex-direction:column;
@@ -456,7 +456,7 @@
         }
         #nsync-panel-resize {
             position:fixed; top:0; right:calc(min(var(--nsync-panel-width, 340px), 92vw) - 9px);
-            width:22px; height:100vh; height:100dvh;
+            width:22px; height:100vh;
             cursor:ew-resize; touch-action:none; z-index:100000;
             display:flex; align-items:center; justify-content:center;
             opacity:0; pointer-events:none;
@@ -3695,7 +3695,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.52 Ready');
+            console.log('[N-Local] v1.1.53 Ready');
         }
 
         const t = setInterval(() => {
