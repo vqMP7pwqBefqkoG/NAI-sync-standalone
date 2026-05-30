@@ -1,69 +1,128 @@
 # NAI Sync Standalone (NovelAI Local Panel)
 
-NovelAIの画像生成画面に、生成履歴の自動保存やプロンプトの復元、タグのオートコンプリート機能などを追加するTampermonkeyスクリプトです。
+NAI Sync Standalone is a Tampermonkey userscript that adds local history, restore, tag suggestions, and mobile editing helpers to NovelAI. It runs without the N-Sync server by storing data in the browser's IndexedDB and by loading tag data from this repository.
 
-## 主な機能
+## Active Files
 
-### 📜 生成履歴の自動保存・閲覧
-画像を生成するたびに、プロンプト・ネガティブプロンプト・シード値・サンプラー・モデルなどの全設定がブラウザ内蔵のデータベース（IndexedDB）に自動で保存されます。履歴はセッション（ページを開いてから閉じるまで）ごとにフォルダ分けされ、サムネイルのグリッドで一覧表示されます。
+- `NovelAI_Local.user.js`: Tampermonkey userscript
+- `danbooru_tags.json` / `danbooru_tags.json.gz`: Danbooru tag data
+- `e621_tags.json` / `e621_tags.json.gz`: e621 tag data
 
-### 🔄 プロンプト復元
-履歴パネル内の画像サムネイルやタイムスタンプをタップするだけで、その画像を生成した時点の全設定をNovelAIのUI上に即座に復元します。パネルは自動的に閉じられ、すぐに再生成が可能です。
+`old_novelai.js` and `temp_old.js` are untracked local backup/work files and are not required for normal use.
 
-### ⭐ お気に入り登録
-履歴画面の「☆」ボタンでお気に入りに登録できます。「⭐お気に入り」タブに切り替えることで、登録した画像だけをまとめて閲覧・復元できます。
+## Features
 
-### 🖼 セッション画像グリッドビュー
-パネル下部の「🖼 グリッド」ボタンを押すと、NovelAIが現在のセッションで生成した画像をフルスクリーンのグリッド形式で一覧表示します。画像をタップするとライトボックスで拡大表示されます。
+- Saves NovelAI generation history in browser IndexedDB
+- Stores compressed thumbnails and PNG metadata for restoration
+- Groups history by browser session
+- Shows session folders and per-session image grids
+- Supports a resizable history panel on mobile and desktop
+- Restores NovelAI settings from saved image metadata
+- Adds and removes favorites
+- Shows the current-session generated image grid
+- Provides batch/continuous generation helper
+- Provides bulk replace across main, negative, and character prompts
+- Provides Danbooru/e621 tag autocomplete
+- Shows top image thumbnails from Danbooru/e621 when tapping a tag count
+- Prioritizes frequently selected tags
+- Provides a mobile D-pad for prompt weight adjustment
+- Provides local backup, preview, and deletion tools
 
-### 🏷️ タグオートコンプリート
-プロンプト入力欄でタグを入力し始めると、Danbooru または e621 のタグ辞書から候補がポップアップ表示されます。候補をタップするとそのタグが挿入されます。ソースの切り替え（Danbooru / e621）もポップアップ内のボタンで行えます。
+## Difference From The Server Version
 
-### ⚖️ プロンプト強調値の調整（方向パッドUI）
-プロンプト入力欄でタグをタップ（またはテキストを選択）すると、そのタグの下に方向パッド型のコントローラーが表示されます。
+This standalone version does not require a local server.
 
-- **▲ / ▼**: 強調値を ±0.1 ずつ調整します（例: `girl` → `1.1::girl::` → `1.2::girl::`）
-- **+0.5 / -0.5**: 強調値を ±0.5 ずつ調整します
-- **+1.0 / -1.0**: 強調値を ±1.0 ずつ調整します
-- **◀ / ▶**: 選択範囲をカンマ区切りで左右に拡張し、複数タグをまとめて強調できます
-- 強調値が 1.0 に戻ると `数値::` の記法は自動的に除去されます
+- History storage: browser IndexedDB
+- Tag suggestions: JSON files loaded from GitHub and searched in the browser
+- Tampermonkey updates: GitHub raw URL for `NovelAI_Local.user.js`
 
-### 🔁 連続生成（バッチ）
-パネル下部の「連続生成」欄に回数を入力して「▶ 開始」を押すと、指定回数分の画像生成を自動で繰り返します。生成中はスマホのスリープを防止する Wake Lock が有効になります。「■ 停止」ボタンでいつでも中断できます。
+The server version is developed separately at:
 
-### 💾 オフラインデータ管理（バックアップ / プレビュー / 消去）
-パネル下部の「💾 データ管理」から以下の操作が行えます：
-- **📥 バックアップをダウンロード**: 全履歴とお気に入りを1つのZIP（JSON）ファイルとしてダウンロードします。
-- **👁️ バックアップをプレビュー**: 保存したバックアップファイルを選択すると、現在のデータを上書きせずに、バックアップ内容を一時的に閲覧できます（プレビューモード）。プレビュー中も画像タップでプロンプト復元が可能です。
-- **🗑 ブラウザが保持している履歴を消去**: ブラウザ内のIndexedDBに保存されている全履歴とお気に入りを削除します。ダウンロード済みのバックアップファイルには影響しません。
+```text
+C:\Users\naoki\ai-sync-hub
+```
 
-## インストール方法
+## Requirements
 
-1. お使いのブラウザに拡張機能 [Tampermonkey](https://www.tampermonkey.net/) をインストールします。
-2. 以下のリンクをタップして、スクリプトをインストールします。
-   👉 **[スクリプトをインストール](https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/NovelAI_Local.user.js)**
-3. NovelAIの画像生成画面（`https://novelai.net/image`）を開くと、画面右端に「📜 履歴」というタブが表示されます。
+- Tampermonkey
+- A browser logged into NovelAI
+- Network access for the first tag-data download
 
-## 使い方
+The script is designed for mobile-only use, but it also works in desktop browsers.
 
-1. NovelAI上で通常通りに画像を生成してください。生成完了時、自動的に履歴パネルに画像がストックされます。
-2. 「📜 履歴」タブをタップするとパネルが開き、セッションごとに整理された履歴を確認できます。
-3. フォルダを開いて画像をタップすると、その時の全設定が復元されます。
-4. データのバックアップは「💾 データ管理」から定期的に行ってください。
+## Installation
 
-## 注意事項
-- 初回起動時にタグ辞書データ（Danbooru/e621、数MB）のダウンロードが行われます。オートコンプリートが動作するまで数秒〜数十秒かかる場合があります。2回目以降はブラウザにキャッシュされるため即座に利用可能です。
-- ブラウザの「Cookieやサイトデータを削除する」操作を行うとIndexedDBの履歴データも消去されます。重要なデータは事前にバックアップしてください。
+Install the userscript from this raw URL:
 
-## 開発・ビルド情報
-本スクリプトは `NovelAI_Sync.user.js` をベースに `build_local.js` を用いて、スタンドアローン環境向けに動的変換・ビルドされています。
+```text
+https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/NovelAI_Local.user.js
+```
 
-## タグデータに関するライセンスと帰属（License & Attribution）
-本スクリプトのオートコンプリート機能で使用しているタグ辞書データ（`danbooru_tags.json`, `e621_tags.json`）は、以下のパブリックなデータベースをもとに作成されています。
+The script runs on:
 
-- **Danbooru Tags**: 
-  - データセット元: [Danbooru](https://danbooru.donmai.us/) (via [deepghs/site_tags](https://huggingface.co/datasets/deepghs/site_tags))
-- **e621 Tags**: 
-  - データセット元: [e621](https://e621.net/) (via [e621 DB Export](https://e621.net/db_export/))
+```text
+https://novelai.net/*
+```
 
-各タグの名称および付随するメタデータ（投稿数等）の権利は、元のデータ提供者およびプラットフォームの利用規約に準拠します。本スクリプトは、ユーザーの利便性向上のための入力補助（サジェスト）目的としてのみこれらのデータを参照・利用しています。
+## Basic Usage
+
+1. Open NovelAI's image generation page.
+2. Tap the history tab on the right side of the screen.
+3. Generate images as usual. Completed generations are saved locally.
+4. Open a session folder and tap an image to restore the settings used for that image.
+5. Use favorites, search, bulk replace, tag autocomplete, or batch generation as needed.
+
+## Tag Suggestions
+
+While editing a prompt, type part of a tag to show suggestions from Danbooru or e621.
+
+- Tap a tag name to insert it.
+- Use the Danbooru/e621 toggle to switch sources.
+- Tap the post-count area to show top image thumbnails in a horizontal scroller.
+- Frequently selected tags are prioritized.
+
+Tag data is downloaded from GitHub on first use and cached in the browser.
+
+## Prompt Weight D-pad
+
+The D-pad appears around the current tag or selected prompt range.
+
+- Up/down: adjust weight by 0.1
+- +0.5 / -0.5: adjust weight by 0.5
+- +1.0 / -1.0: adjust weight by 1.0
+- Left/right: expand the selected range by comma-separated tag blocks
+
+On mobile, D-pad placement is delayed and refreshed while the keyboard appears, reducing first-tap positioning glitches.
+
+## Data Management
+
+The data management panel can:
+
+- Download a backup
+- Preview a backup
+- Delete local history and favorites
+
+Browser site-data deletion can remove IndexedDB history. Create a backup before clearing cookies or site data.
+
+## Development Notes
+
+- Edit `NovelAI_Local.user.js` as UTF-8.
+- Avoid PowerShell 5.1 `Get-Content` / `Set-Content` for Japanese-containing scripts because it can corrupt comments and string literals.
+- Prefer a UTF-8-aware editor, or Node `fs.readFileSync(path, 'utf8')` and `fs.writeFileSync(path, text, 'utf8')`.
+- After editing the userscript, run:
+
+```powershell
+node --check NovelAI_Local.user.js
+```
+
+- Bump `@version` in `NovelAI_Local.user.js` whenever Tampermonkey should detect an update.
+- Push changes to GitHub because this standalone version updates through GitHub.
+
+## Tag Data Attribution
+
+Tag suggestion data is derived from public sources:
+
+- Danbooru: https://danbooru.donmai.us/ and https://huggingface.co/datasets/deepghs/site_tags
+- e621: https://e621.net/db_export/
+
+Tag names, post counts, and related metadata remain subject to the source platforms' terms and licenses.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.51
+// @version      1.1.52
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -851,7 +851,7 @@
         panel.id = 'nsync-panel';
         panel.innerHTML = `
             <div id="nsync-header">
-                <div id="nsync-header-title">N-Sync</div>
+                <div id="nsync-header-title">N-Local</div>
                 <div style="display:flex;align-items:center;gap:4px;">
                     <span id="nsync-status">● 切断</span>
                     <button id="nsync-close">✕</button>
@@ -1689,7 +1689,7 @@
             const data = await LocalDB.searchTags(query, acSource);
             showAutocomplete(data || [], query);
         } catch (err) {
-            console.error('[N-Sync] Autocomplete error:', err);
+            console.error('[N-Local] Autocomplete error:', err);
         }
     }
 
@@ -2618,13 +2618,13 @@
                 // Add Preview Exit UI
                 const titleEl = document.getElementById('nsync-header-title');
                 if (!document.getElementById('nsync-exit-preview')) {
-                    titleEl.innerHTML = 'N-Sync <span style="color:#e55;font-size:11px;margin-left:4px;">[PREVIEW]</span> <button id="nsync-exit-preview" style="background:#e55;color:#fff;border:none;border-radius:3px;padding:2px 6px;font-size:10px;cursor:pointer;margin-left:6px;">終了</button>';
+                    titleEl.innerHTML = 'N-Local <span style="color:#e55;font-size:11px;margin-left:4px;">[PREVIEW]</span> <button id="nsync-exit-preview" style="background:#e55;color:#fff;border:none;border-radius:3px;padding:2px 6px;font-size:10px;cursor:pointer;margin-left:6px;">終了</button>';
                     document.getElementById('nsync-exit-preview').addEventListener('click', () => {
                         window._isPreviewMode = false;
                         window._backupPreviewSessions = null;
                         window._backupPreviewHistory = null;
                         window._backupPreviewFavorites = null;
-                        titleEl.textContent = 'N-Sync';
+                        titleEl.textContent = 'N-Local';
                         activeTab = 'history';
                         document.querySelectorAll('.nsync-tab-btn').forEach(b => b.classList.remove('active'));
                         document.querySelectorAll('.nsync-tab-btn')[0].classList.add('active');
@@ -3147,7 +3147,7 @@
                         mobileInput.dispatchEvent(new Event('change', { bubbles: true }));
                         showToast('✅ スマホ用インポートで設定を復元しました', 'ok');
                     } catch(e) {
-                        console.error('[N-Sync] mobile input injection error', e);
+                        console.error('[N-Local] mobile input injection error', e);
                         showToast('❌ スマホ復元に失敗しました', 'error');
                     }
                 } else {
@@ -3197,7 +3197,7 @@
             }, 50);
 
         } catch (err) {
-            console.error('[N-Sync] D&D simulation error', err);
+            console.error('[N-Local] D&D simulation error', err);
             showToast('❌ 復元イベントの発火に失敗しました', 'error');
             window._nsyncIsRestoring = false;
         }
@@ -3239,11 +3239,11 @@
         document.addEventListener('pointerdown', (e) => {
             if (isGenerateButton(e.target)) {
                 _nsyncPendingGenerations++;
-                console.log(`[N-Sync] Generate tapped (pending: ${_nsyncPendingGenerations})`);
+                console.log(`[N-Local] Generate tapped (pending: ${_nsyncPendingGenerations})`);
             }
         }, true);
 
-        console.log('[N-Sync] URL.createObjectURL patched ✓');
+        console.log('[N-Local] URL.createObjectURL patched ✓');
     }
 
     function processGeneratedImage(blob) {
@@ -3337,7 +3337,7 @@
                         charPromptsJson = JSON.stringify(cpArray);
                     }
                 } catch(e) {
-                    console.error('[N-Sync] Character prompt extraction error:', e);
+                    console.error('[N-Local] Character prompt extraction error:', e);
                 }
 
                 const fullData = {
@@ -3379,7 +3379,7 @@
                 };
                 img.src = _origCreateObjectURL.call(URL, blob); // フック再突入を回避
 
-            } catch(e) { console.error('[N-Sync] Thumbnail processing error:', e); }
+            } catch(e) { console.error('[N-Local] Thumbnail processing error:', e); }
         };
         reader.readAsArrayBuffer(blob);
     }
@@ -3387,7 +3387,7 @@
     function sendToHub(data) {
         // Generateボタンが押されていない場合（手動インポート）は履歴に保存しない
         if (_nsyncPendingGenerations <= 0) {
-            console.log('[N-Sync] Skipping history save (no pending generation – likely an import)');
+            console.log('[N-Local] Skipping history save (no pending generation – likely an import)');
             return;
         }
         _nsyncPendingGenerations--;
@@ -3401,7 +3401,7 @@
                 if (batchOnGenerated) batchOnGenerated();
             })
             .catch(err => {
-                console.error('[N-Sync] Local DB save error:', err);
+                console.error('[N-Local] Local DB save error:', err);
                 showToast('❌ ローカル保存に失敗しました', 'error');
                 if (batchOnGenerated) batchOnGenerated();
             });
@@ -3417,7 +3417,7 @@
             try {
                 wakeLock = await navigator.wakeLock.request('screen');
             } catch (err) {
-                console.warn('[N-Sync] Wake Lock request failed:', err);
+                console.warn('[N-Local] Wake Lock request failed:', err);
             }
         }
     }
@@ -3695,7 +3695,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.51 Ready');
+            console.log('[N-Local] v1.1.52 Ready');
         }
 
         const t = setInterval(() => {
