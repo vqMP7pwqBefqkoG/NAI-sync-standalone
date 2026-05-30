@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.49
+// @version      1.1.50
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1995,7 +1995,7 @@
         const style = document.createElement('style');
         style.textContent = `
             .nsync-dpad {
-                position: absolute; z-index: 999998; display: none;
+                position: fixed; z-index: 999998; display: none;
                 background: rgba(17, 13, 24, 0.85);
                 padding: 8px; border-radius: 12px;
                 box-shadow: 0 4px 15px rgba(0,0,0,0.6);
@@ -2121,18 +2121,15 @@
     function updateDpadView() {
         if (!dpadActiveNode) return;
 
-        // 表示条件チェック: 選択範囲のテキストが空白のみの場合は非表示
-        // （最後のカンマの直後で何もタグがない場合、または「,,」の間にいる場合）
         const fullText = getFullText(dpadActiveNode);
         const selectedText = fullText.substring(dpadStartIndex, dpadEndIndex);
-        
+
         if (selectedText.trim().length === 0) {
             return hideDpad();
         }
-        
+
         const range = getAbsoluteRange(dpadActiveNode, dpadStartIndex, dpadEndIndex);
-        
-        // 実際のDOM選択はせず、フェイクのハイライトを描画する
+
         dpadHighlightOverlay.innerHTML = '';
         const rects = range.getClientRects();
         for (let i = 0; i < rects.length; i++) {
@@ -2150,27 +2147,51 @@
             `;
             dpadHighlightOverlay.appendChild(hl);
         }
-        
-        const rect = range.getBoundingClientRect();
-        if (rect.width === 0 && rect.height === 0) {
-            dpadHighlightOverlay.innerHTML = '';
-            return hideDpad();
-        }
 
-        dpadPopup.style.display = 'block';
-        const dpadW = 128, dpadH = 128; // パッドのおおよそのサイズ
-        const dpadLeft = Math.max(10, Math.min(rect.left + rect.width / 2 - 60, window.innerWidth - dpadW - 10));
-        let dpadTop = rect.bottom + window.scrollY + 10;
-        // 画面下にはみ出す場合はテキストの上に表示
-        if (rect.bottom + dpadH + 20 > window.innerHeight) {
-            dpadTop = rect.top + window.scrollY - dpadH - 10;
-        }
-        // それでも画面上部からはみ出す場合は画面内に収める
-        if (dpadTop - window.scrollY < 0) {
-            dpadTop = window.scrollY + 10;
-        }
-        dpadPopup.style.left = `${dpadLeft}px`;
-        dpadPopup.style.top = `${dpadTop}px`;
+        const placeDpad = () => {
+            const rect = range.getBoundingClientRect();
+            if (rect.width === 0 && rect.height === 0) {
+                dpadHighlightOverlay.innerHTML = '';
+                return hideDpad();
+            }
+
+            const vv = window.visualViewport;
+            const viewportLeft = vv ? vv.offsetLeft : 0;
+            const viewportTop = vv ? vv.offsetTop : 0;
+            const viewportWidth = vv ? vv.width : window.innerWidth;
+            const viewportHeight = vv ? vv.height : window.innerHeight;
+            const margin = 10;
+
+            dpadPopup.style.visibility = 'hidden';
+            dpadPopup.style.display = 'block';
+
+            const popupRect = dpadPopup.getBoundingClientRect();
+            const dpadW = popupRect.width || 128;
+            const dpadH = popupRect.height || 128;
+
+            let left = rect.left + rect.width / 2 - dpadW / 2;
+            left = Math.max(
+                viewportLeft + margin,
+                Math.min(left, viewportLeft + viewportWidth - dpadW - margin)
+            );
+
+            const belowTop = rect.bottom + margin;
+            const aboveTop = rect.top - dpadH - margin;
+            const fitsBelow = belowTop + dpadH <= viewportTop + viewportHeight - margin;
+            const fitsAbove = aboveTop >= viewportTop + margin;
+            let top = fitsBelow || !fitsAbove ? belowTop : aboveTop;
+            top = Math.max(
+                viewportTop + margin,
+                Math.min(top, viewportTop + viewportHeight - dpadH - margin)
+            );
+
+            dpadPopup.style.left = `${left}px`;
+            dpadPopup.style.top = `${top}px`;
+            dpadPopup.style.visibility = 'visible';
+        };
+
+        placeDpad();
+        requestAnimationFrame(placeDpad);
     }
 
     function hideDpad() {
@@ -3643,7 +3664,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.49 Ready');
+            console.log('[N-Local] v1.1.50 Ready');
         }
 
         const t = setInterval(() => {
