@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.54
+// @version      1.1.55
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -781,41 +781,24 @@
     // ============================================================
     // === UI 構築 ===
     // ============================================================
-    let nsyncPanelStableHeight = 0;
-
     function getNsyncViewportHeight() {
         const vv = window.visualViewport;
         return Math.round(vv ? vv.height : window.innerHeight);
     }
 
-    function isNsyncKeyboardViewport(height) {
-        const active = document.activeElement;
-        const inPanelInput = !!(active && active.closest && active.closest('#nsync-panel') && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName));
-        const inPromptEditor = !!(active && active.closest && active.closest('.ProseMirror'));
-        const editing = inPanelInput || inPromptEditor;
-        return !!(window.visualViewport && editing && nsyncPanelStableHeight && height < nsyncPanelStableHeight * 0.85);
-    }
-
-    function applyNsyncPanelHeight(force = false) {
+    function applyNsyncPanelHeight() {
         const height = getNsyncViewportHeight();
         if (!height) return;
-
-        const keyboardOpen = isNsyncKeyboardViewport(height);
-        if (force || !keyboardOpen || !nsyncPanelStableHeight) {
-            nsyncPanelStableHeight = height;
-        }
-
-        const panelHeight = keyboardOpen ? nsyncPanelStableHeight : height;
-        document.documentElement.style.setProperty('--nsync-panel-height', panelHeight + 'px');
+        document.documentElement.style.setProperty('--nsync-panel-height', height + 'px');
     }
 
     function initNsyncPanelHeightLock() {
-        applyNsyncPanelHeight(true);
+        applyNsyncPanelHeight();
 
-        window.addEventListener('resize', () => applyNsyncPanelHeight(false), { passive: true });
+        window.addEventListener('resize', applyNsyncPanelHeight, { passive: true });
         if (window.visualViewport) {
-            window.visualViewport.addEventListener('resize', () => applyNsyncPanelHeight(false), { passive: true });
-            window.visualViewport.addEventListener('scroll', () => applyNsyncPanelHeight(false), { passive: true });
+            window.visualViewport.addEventListener('resize', applyNsyncPanelHeight, { passive: true });
+            window.visualViewport.addEventListener('scroll', applyNsyncPanelHeight, { passive: true });
         }
     }
 
@@ -3734,7 +3717,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.54 Ready');
+            console.log('[N-Local] v1.1.55 Ready');
         }
 
         const t = setInterval(() => {
