@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.59
+// @version      1.1.60
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1400,6 +1400,7 @@
     let acActivePm = null;
     let acAbsStart = 0;
     let acAbsEnd = 0;
+    let acQueryCandidates = [];
     let acSource = localStorage.getItem('nsync-tag-source') || 'danbooru'; // 'danbooru' or 'e621'
     
     // ============================================================
@@ -1593,7 +1594,7 @@
         const text = fullText.substring(0, absOffset);
         
         const lastComma = Math.max(text.lastIndexOf(','), text.lastIndexOf('\n'));
-        const currentWord = text.substring(lastComma + 1).trimStart();
+        const currentWord = text.substring(lastComma + 1);
 
         // NovelAIの重み付け構文(0.5::)や括弧({,[,()をプレフィックスとして分離
         const regex = /^((?:[\{\[\(\s]*[\-－−‐]?[0-9.]+::)?[\{\[\(\s]*)(.*)$/;
@@ -1605,7 +1606,16 @@
         searchWord = searchWord.replace(/::/g, '').trim();
 
         if (searchWord.length >= 2 && searchWord.length <= 50) {
-            const query = searchWord.replace(/ /g, '_').toLowerCase();
+            const query = searchWord.replace(/\s+/g, '_').toLowerCase();
+            const candidates = [{ query, absStart: absOffset - currentWord.length, prefix }];
+            const parts = searchWord.split(/\s+/).filter(Boolean);
+            for (let i = 1; i < parts.length; i++) {
+                const suffixText = parts.slice(i).join(' ');
+                const suffixQuery = suffixText.replace(/\s+/g, '_').toLowerCase();
+                if (suffixQuery.length >= 2 && suffixQuery.length <= 50 && !candidates.some(c => c.query === suffixQuery)) {
+                    candidates.push({ query: suffixQuery, absStart: absOffset - suffixText.length, prefix: '' });
+                }
+            }
             
             const range = selection.getRangeAt(0);
             const rect = range.getBoundingClientRect();
@@ -1625,15 +1635,17 @@
             acPrefix = prefix;
             
             acActivePm = pm;
-            acAbsStart = absOffset - currentWord.length;
+            acAbsStart = candidates[0].absStart;
             acAbsEnd = absOffset;
+            acQueryCandidates = candidates;
 
             // デバウンス + 同一クエリスキップで高速化・誤タップ防止
             if (_acDebounceTimer) clearTimeout(_acDebounceTimer);
-            if (query === _acLastQuery && acPopup.style.display !== 'none') return;
+            const queryKey = candidates.map(c => c.query).join('|');
+            if (queryKey === _acLastQuery && acPopup.style.display !== 'none') return;
             _acDebounceTimer = setTimeout(async () => {
-                _acLastQuery = query;
-                await fetchAndShowSuggestions(query);
+                _acLastQuery = queryKey;
+                await fetchAndShowSuggestions(queryKey);
             }, 120);
         } else {
             hideAutocomplete();
@@ -1730,10 +1742,26 @@
         }
     }
 
-    async function fetchAndShowSuggestions(query) {
+    async function fetchAndShowSuggestions(queryKey) {
         try {
-            const data = await LocalDB.searchTags(query, acSource);
-            showAutocomplete(data || [], query);
+            const candidates = acQueryCandidates.length
+                ? acQueryCandidates
+                : [{ query: queryKey, absStart: acAbsStart, prefix: acPrefix }];
+            let emptyQuery = candidates[0].query;
+
+            for (const candidate of candidates) {
+                const data = await LocalDB.searchTags(candidate.query, acSource);
+                if (data && data.length > 0) {
+                    acAbsStart = candidate.absStart;
+                    acPrefix = candidate.prefix;
+                    showAutocomplete(data, candidate.query);
+                    return;
+                }
+            }
+
+            acAbsStart = candidates[0].absStart;
+            acPrefix = candidates[0].prefix;
+            showAutocomplete([], emptyQuery);
         } catch (err) {
             console.error('[N-Local] Autocomplete error:', err);
         }
@@ -1953,6 +1981,7 @@
         if (acPopup) acPopup.style.display = 'none';
         document.querySelectorAll('.nsync-ac-tooltip-popup').forEach(el => el.remove());
         acSuggestions = [];
+        acQueryCandidates = [];
         acSelectedIndex = -1;
     }
 
@@ -3742,7 +3771,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.59 Ready');
+            console.log('[N-Local] v1.1.60 Ready');
         }
 
         const t = setInterval(() => {
