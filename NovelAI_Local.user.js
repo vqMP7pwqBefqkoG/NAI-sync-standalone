@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.58
+// @version      1.1.59
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -1049,7 +1049,6 @@
                     <h3 style="color:#9d7fd4;margin-top:0;">🔍 一括置換</h3>
                     <div style="text-align:left; font-size:12px; color:#c4a8e8; margin-bottom:15px;">
                         <label style="display:block; margin-bottom:5px;"><input type="checkbox" id="nsync-rep-main" checked> メインプロンプト</label>
-                        <label style="display:block; margin-bottom:5px;"><input type="checkbox" id="nsync-rep-neg" checked> ネガティブプロンプト</label>
                         <label style="display:block;"><input type="checkbox" id="nsync-rep-char" checked> キャラクタープロンプト</label>
                     </div>
                     <div style="margin-bottom:10px; position:relative;">
@@ -1180,7 +1179,7 @@
             document.getElementById('nsync-close-replace').addEventListener('click', () => overlay.remove());
             document.getElementById('nsync-do-replace').addEventListener('click', async () => {
                 const doMain = document.getElementById('nsync-rep-main').checked;
-                const doNeg = document.getElementById('nsync-rep-neg').checked;
+                const doNeg = false;
                 const doChar = document.getElementById('nsync-rep-char').checked;
                 const searchStr = document.getElementById('nsync-rep-search').value;
                 const targetStr = document.getElementById('nsync-rep-target').value;
@@ -3743,7 +3742,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.58 Ready');
+            console.log('[N-Local] v1.1.59 Ready');
         }
 
         const t = setInterval(() => {
