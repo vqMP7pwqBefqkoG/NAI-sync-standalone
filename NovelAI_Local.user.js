@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.63
+// @version      1.1.64
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -2450,7 +2450,7 @@
                 <img src="${url}" loading="lazy" alt="Generated #${idx}" />
                 <div class="nsync-grid-item-idx">#${idx}</div>
             `;
-            item.addEventListener('click', () => selectNovelAIHistoryImage(entry, url, i));
+            item.addEventListener('click', () => openGridLightbox(url, entry, i));
             body.appendChild(item);
         });
     }
@@ -2543,17 +2543,26 @@
             return;
         }
 
-        showToast('NovelAI側の同じ画像が見つからないため拡大表示します', 'error');
-        openGridLightbox(fallbackUrl);
+        showToast('NovelAI側の同じ画像が見つかりませんでした', 'error');
     }
 
-    function openGridLightbox(url) {
+    function openGridLightbox(url, entry = null, displayIndex = -1) {
         document.getElementById('nsync-grid-lightbox')?.remove();
 
         const lb = document.createElement('div');
         lb.id = 'nsync-grid-lightbox';
         lb.innerHTML = `<img src="${url}" />`;
         lb.addEventListener('click', () => lb.remove());
+        const img = lb.querySelector('img');
+        if (img && entry) {
+            img.style.cursor = 'pointer';
+            img.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                lb.remove();
+                selectNovelAIHistoryImage(entry, url, displayIndex);
+            });
+        }
 
         // Escapeキーで閉じる
         const escHandler = (e) => {
@@ -3875,7 +3884,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.63 Ready');
+            console.log('[N-Local] v1.1.64 Ready');
         }
 
         const t = setInterval(() => {
