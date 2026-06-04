@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.62
+// @version      1.1.63
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -2450,7 +2450,7 @@
                 <img src="${url}" loading="lazy" alt="Generated #${idx}" />
                 <div class="nsync-grid-item-idx">#${idx}</div>
             `;
-            item.addEventListener('click', () => selectNovelAIHistoryImage(entry, url));
+            item.addEventListener('click', () => selectNovelAIHistoryImage(entry, url, i));
             body.appendChild(item);
         });
     }
@@ -2485,7 +2485,7 @@
         target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
     }
 
-    async function selectNovelAIHistoryImage(entry, fallbackUrl) {
+    async function selectNovelAIHistoryImage(entry, fallbackUrl, displayIndex) {
         const blob = entry.blob || entry;
         const urls = Array.from(new Set([...(entry.objectUrls || []), ...(blob._nsyncObjectUrls || []), fallbackUrl].filter(Boolean)));
         const overlay = document.getElementById('nsync-grid-overlay');
@@ -2531,6 +2531,16 @@
                     return;
                 }
             }
+        }
+
+        const chooseButtons = Array.from(document.querySelectorAll('[role="button"][aria-label="choose image"]')).filter(el => {
+            return !el.closest('#nsync-grid-overlay') && !el.closest('#nsync-grid-lightbox');
+        });
+        if (chooseButtons[displayIndex]) {
+            overlay?.remove();
+            clickNovelAIImageElement(chooseButtons[displayIndex]);
+            showToast('NovelAI側の履歴画像を表示順で選択しました', 'ok');
+            return;
         }
 
         showToast('NovelAI側の同じ画像が見つからないため拡大表示します', 'error');
@@ -3865,7 +3875,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.62 Ready');
+            console.log('[N-Local] v1.1.63 Ready');
         }
 
         const t = setInterval(() => {
