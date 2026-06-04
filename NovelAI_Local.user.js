@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.60
+// @version      1.1.61
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -2429,18 +2429,20 @@
         document.addEventListener('keydown', escHandler);
 
         const blobs = window._nsyncSessionBlobs || [];
-        if (blobs.length === 0) {
+        const sessionItems = window._nsyncSessionItems || blobs.map(blob => ({ blob, objectUrls: blob._nsyncObjectUrls || [] }));
+        if (sessionItems.length === 0) {
             body.innerHTML = '<div style="color:#555;font-size:13px;padding:40px;text-align:center;">このセッションで生成された画像がまだありません</div>';
             header.querySelector('#nsync-grid-count').textContent = '0枚';
             return;
         }
 
-        header.querySelector('#nsync-grid-count').textContent = `${blobs.length}枚`;
+        header.querySelector('#nsync-grid-count').textContent = `${sessionItems.length}枚`;
         body.innerHTML = '';
         
         // メモリ上の配列は生成順になっているので、そのまま逆順（新しい順）で表示
-        blobs.slice().reverse().forEach((blob, i) => {
-            const idx = blobs.length - i;
+        sessionItems.slice().reverse().forEach((entry, i) => {
+            const idx = sessionItems.length - i;
+            const blob = entry.blob || entry;
             const url = (_origCreateObjectURL || URL.createObjectURL).call(URL, blob);
             const item = document.createElement('div');
             item.className = 'nsync-grid-item';
@@ -2448,9 +2450,31 @@
                 <img src="${url}" loading="lazy" alt="Generated #${idx}" />
                 <div class="nsync-grid-item-idx">#${idx}</div>
             `;
-            item.addEventListener('click', () => openGridLightbox(url));
+            item.addEventListener('click', () => selectNovelAIHistoryImage(entry, url));
             body.appendChild(item);
         });
+    }
+
+    function selectNovelAIHistoryImage(entry, fallbackUrl) {
+        const urls = Array.from(new Set([...(entry.objectUrls || []), fallbackUrl].filter(Boolean)));
+        const overlay = document.getElementById('nsync-grid-overlay');
+        const currentGridImgs = new Set(Array.from(overlay?.querySelectorAll('img') || []));
+
+        for (const url of urls) {
+            const img = Array.from(document.querySelectorAll('img')).find(el => {
+                return el.src === url && !currentGridImgs.has(el) && !el.closest('#nsync-grid-overlay') && !el.closest('#nsync-grid-lightbox');
+            });
+            if (img) {
+                overlay?.remove();
+                img.scrollIntoView({ block: 'center', inline: 'center' });
+                img.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                showToast('NovelAI側の履歴画像を選択しました', 'ok');
+                return;
+            }
+        }
+
+        showToast('NovelAI側の同じ画像が見つからないため拡大表示します', 'error');
+        openGridLightbox(fallbackUrl);
     }
 
     function openGridLightbox(url) {
@@ -3287,6 +3311,8 @@
         window.URL.createObjectURL = function(obj) {
             const url = _origCreateObjectURL.apply(this, arguments);
             if (obj && obj instanceof Blob && obj.type === 'image/png') {
+                obj._nsyncObjectUrls = obj._nsyncObjectUrls || [];
+                obj._nsyncObjectUrls.push(url);
                 if (!obj._nsyncProcessed) {
                     obj._nsyncProcessed = true;
                     setTimeout(() => processGeneratedImage(obj), 50);
@@ -3360,6 +3386,11 @@
             // セッション画像グリッド表示用にBlobを記憶（ページリロードでリセットされる）
             window._nsyncSessionBlobs = window._nsyncSessionBlobs || [];
             window._nsyncSessionBlobs.push(blob);
+            window._nsyncSessionItems = window._nsyncSessionItems || [];
+            window._nsyncSessionItems.push({
+                blob,
+                objectUrls: (blob._nsyncObjectUrls || []).slice()
+            });
 
             try {
                 let apiData = {};
@@ -3771,7 +3802,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.60 Ready');
+            console.log('[N-Local] v1.1.61 Ready');
         }
 
         const t = setInterval(() => {
