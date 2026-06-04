@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.61
+// @version      1.1.62
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -2455,21 +2455,81 @@
         });
     }
 
-    function selectNovelAIHistoryImage(entry, fallbackUrl) {
-        const urls = Array.from(new Set([...(entry.objectUrls || []), fallbackUrl].filter(Boolean)));
+    async function hashArrayBuffer(buffer) {
+        const digest = await crypto.subtle.digest('SHA-256', buffer);
+        return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function hashBlob(blob) {
+        if (!blob) return '';
+        if (blob._nsyncHash) return blob._nsyncHash;
+        const hash = await hashArrayBuffer(await blob.arrayBuffer());
+        blob._nsyncHash = hash;
+        return hash;
+    }
+
+    async function hashImageUrl(url) {
+        if (!url || !url.startsWith('blob:')) return '';
+        try {
+            const res = await fetch(url);
+            const blob = await res.blob();
+            return await hashBlob(blob);
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function clickNovelAIImageElement(el) {
+        const target = el.closest('button,[role="button"],a') || el;
+        target.scrollIntoView({ block: 'center', inline: 'center' });
+        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    }
+
+    async function selectNovelAIHistoryImage(entry, fallbackUrl) {
+        const blob = entry.blob || entry;
+        const urls = Array.from(new Set([...(entry.objectUrls || []), ...(blob._nsyncObjectUrls || []), fallbackUrl].filter(Boolean)));
         const overlay = document.getElementById('nsync-grid-overlay');
         const currentGridImgs = new Set(Array.from(overlay?.querySelectorAll('img') || []));
 
         for (const url of urls) {
             const img = Array.from(document.querySelectorAll('img')).find(el => {
-                return el.src === url && !currentGridImgs.has(el) && !el.closest('#nsync-grid-overlay') && !el.closest('#nsync-grid-lightbox');
+                return (el.src === url || el.currentSrc === url) && !currentGridImgs.has(el) && !el.closest('#nsync-grid-overlay') && !el.closest('#nsync-grid-lightbox');
             });
             if (img) {
                 overlay?.remove();
-                img.scrollIntoView({ block: 'center', inline: 'center' });
-                img.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                clickNovelAIImageElement(img);
                 showToast('NovelAI側の履歴画像を選択しました', 'ok');
                 return;
+            }
+        }
+
+        for (const url of urls) {
+            const bgEl = Array.from(document.querySelectorAll('*')).find(el => {
+                if (el.closest('#nsync-grid-overlay') || el.closest('#nsync-grid-lightbox')) return false;
+                return (getComputedStyle(el).backgroundImage || '').includes(url);
+            });
+            if (bgEl) {
+                overlay?.remove();
+                clickNovelAIImageElement(bgEl);
+                showToast('NovelAI側の履歴画像を選択しました', 'ok');
+                return;
+            }
+        }
+
+        const targetHash = entry.hash || blob._nsyncHash || (entry.hashPromise ? await entry.hashPromise : await hashBlob(blob));
+        if (targetHash) {
+            const candidateImgs = Array.from(document.querySelectorAll('img')).filter(el => {
+                const src = el.currentSrc || el.src || '';
+                return src.startsWith('blob:') && !currentGridImgs.has(el) && !el.closest('#nsync-grid-overlay') && !el.closest('#nsync-grid-lightbox');
+            });
+            for (const img of candidateImgs) {
+                const hash = await hashImageUrl(img.currentSrc || img.src);
+                if (hash && hash === targetHash) {
+                    overlay?.remove();
+                    clickNovelAIImageElement(img);
+                    showToast('NovelAI側の履歴画像を選択しました', 'ok');
+                    return;
+                }
             }
         }
 
@@ -3387,9 +3447,12 @@
             window._nsyncSessionBlobs = window._nsyncSessionBlobs || [];
             window._nsyncSessionBlobs.push(blob);
             window._nsyncSessionItems = window._nsyncSessionItems || [];
+            const hashPromise = hashBlob(blob).catch(() => '');
             window._nsyncSessionItems.push({
                 blob,
-                objectUrls: (blob._nsyncObjectUrls || []).slice()
+                objectUrls: blob._nsyncObjectUrls || [],
+                hash: blob._nsyncHash || '',
+                hashPromise
             });
 
             try {
@@ -3802,7 +3865,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.61 Ready');
+            console.log('[N-Local] v1.1.62 Ready');
         }
 
         const t = setInterval(() => {
