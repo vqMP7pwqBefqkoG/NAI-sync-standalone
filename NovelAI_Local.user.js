@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.64
+// @version      1.1.65
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -2065,6 +2065,7 @@
     let dpadActiveNode = null;
     let dpadTimer = null;
     let dpadViewportTimer = null;
+    let dpadRepositionTimer = null;
     let dpadPlaceToken = 0;
     let dpadInserting = false;
 
@@ -2077,6 +2078,11 @@
         dpadPopup.style.visibility = 'hidden';
         clearTimeout(dpadViewportTimer);
         dpadViewportTimer = setTimeout(() => updateDpadView(), 180);
+    }
+
+    function scheduleDpadReposition() {
+        clearTimeout(dpadRepositionTimer);
+        dpadRepositionTimer = setTimeout(() => updateDpadView(), 1000);
     }
 
     function initDpad() {
@@ -2211,7 +2217,7 @@
         }, isMobileDpadViewport() ? 650 : 300);
     }
 
-    function updateDpadView() {
+    function updateDpadView(keepPosition = false) {
         if (!dpadActiveNode) return;
 
         const fullText = getFullText(dpadActiveNode);
@@ -2241,6 +2247,11 @@
                 pointer-events: none;
             `;
             dpadHighlightOverlay.appendChild(hl);
+        }
+
+        if (keepPosition && dpadPopup && dpadPopup.style.display !== 'none') {
+            dpadPopup.style.visibility = 'visible';
+            return;
         }
 
         const placeDpad = (reveal) => {
@@ -2298,6 +2309,7 @@
     function hideDpad() {
         dpadPlaceToken++;
         clearTimeout(dpadViewportTimer);
+        clearTimeout(dpadRepositionTimer);
         if (dpadPopup) {
             dpadPopup.style.display = 'none';
             dpadPopup.style.visibility = 'visible';
@@ -2322,7 +2334,8 @@
         if (dpadStartIndex < 0) dpadStartIndex = 0;
         if (dpadEndIndex > fullText.length) dpadEndIndex = fullText.length;
         
-        updateDpadView();
+        updateDpadView(true);
+        scheduleDpadReposition();
     }
 
     function adjustWeight(delta) {
@@ -2371,7 +2384,8 @@
         
         // 非同期に発火するselectionchangeイベントを無視するため、少し遅延させてからフラグを戻す
         setTimeout(() => {
-            updateDpadView();
+            updateDpadView(true);
+            scheduleDpadReposition();
             dpadInserting = false;
         }, 50);
     }
@@ -3884,7 +3898,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.64 Ready');
+            console.log('[N-Local] v1.1.65 Ready');
         }
 
         const t = setInterval(() => {
