@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.65
+// @version      1.1.66
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -2106,6 +2106,11 @@
             }
             .nsync-dp-btn:active { background: #6e40c9; color: white; }
             .nsync-dp-sub { font-size: 11px !important; }
+            .nsync-dpad-delete {
+                background: #4a1722; color: #ffb3c1; font-size: 11px !important;
+                border: 1px solid #7a2638;
+            }
+            .nsync-dpad-delete:active { background: #8a2f46; color: #fff; }
         `;
         document.head.appendChild(style);
 
@@ -2117,7 +2122,7 @@
                 <div class="nsync-dp-btn nsync-dpad-up">▲</div>
                 <div class="nsync-dp-btn nsync-dp-sub nsync-dpad-up1">+1.0</div>
                 <div class="nsync-dp-btn nsync-dpad-left">◀</div>
-                <div style="width:36px;height:36px;background:rgba(0,0,0,0.3);border-radius:4px;"></div>
+                <div class="nsync-dp-btn nsync-dp-sub nsync-dpad-delete" title="選択タグを削除">Del</div>
                 <div class="nsync-dp-btn nsync-dpad-right">▶</div>
                 <div class="nsync-dp-btn nsync-dp-sub nsync-dpad-down05">-0.5</div>
                 <div class="nsync-dp-btn nsync-dpad-down">▼</div>
@@ -2138,6 +2143,7 @@
         dpadPopup.querySelector('.nsync-dpad-down1').addEventListener('pointerup', (e) => { e.preventDefault(); adjustWeight(-1.0); });
         dpadPopup.querySelector('.nsync-dpad-left').addEventListener('pointerup', (e) => { e.preventDefault(); expandSelection('left'); });
         dpadPopup.querySelector('.nsync-dpad-right').addEventListener('pointerup', (e) => { e.preventDefault(); expandSelection('right'); });
+        dpadPopup.querySelector('.nsync-dpad-delete').addEventListener('pointerup', (e) => { e.preventDefault(); deleteSelectedTag(); });
 
         document.body.appendChild(dpadPopup);
         
@@ -2336,6 +2342,38 @@
         
         updateDpadView(true);
         scheduleDpadReposition();
+    }
+
+    function deleteSelectedTag() {
+        if (!dpadActiveNode) return;
+        const fullText = getFullText(dpadActiveNode);
+        let start = Math.max(0, Math.min(dpadStartIndex, fullText.length));
+        let end = Math.max(start, Math.min(dpadEndIndex, fullText.length));
+
+        if (fullText[end] === ',') {
+            end += 1;
+            if (start === 0) {
+                while (end < fullText.length && /\s/.test(fullText[end])) end += 1;
+            }
+        } else {
+            const prevComma = fullText.lastIndexOf(',', start - 1);
+            if (prevComma !== -1 && fullText.slice(prevComma + 1, start).trim() === '') {
+                start = prevComma;
+            }
+        }
+
+        const range = getAbsoluteRange(dpadActiveNode, start, end);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+
+        dpadInserting = true;
+        document.execCommand('insertText', false, '');
+
+        setTimeout(() => {
+            dpadInserting = false;
+            hideDpad();
+        }, 50);
     }
 
     function adjustWeight(delta) {
@@ -3898,7 +3936,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.65 Ready');
+            console.log('[N-Local] v1.1.66 Ready');
         }
 
         const t = setInterval(() => {
