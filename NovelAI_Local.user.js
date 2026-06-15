@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.66
+// @version      1.1.67
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -3452,30 +3452,64 @@
             return url;
         };
 
-        // Generateボタンのタップ/クリックを検出し、生成カウンターをインクリメント
-        // イベント委譲方式：ボタンがReactで再生成されても確実に検出できる
-        function isGenerateButton(el) {
-            let node = el;
-            while (node && node !== document.body) {
-                if (node.tagName === 'BUTTON') {
-                    const span = node.querySelector('span');
-                    if (span && /^Generate \d+ Image/.test(span.textContent)) {
-                        return true;
-                    }
-                }
-                node = node.parentElement;
-            }
-            return false;
-        }
-
         document.addEventListener('pointerdown', (e) => {
-            if (isGenerateButton(e.target)) {
+            if (e.isTrusted && isGenerateButton(e.target)) {
                 _nsyncPendingGenerations++;
                 console.log(`[N-Local] Generate tapped (pending: ${_nsyncPendingGenerations})`);
             }
         }, true);
 
         console.log('[N-Local] URL.createObjectURL patched ✓');
+    }
+
+    function getButtonLabel(btn) {
+        return [
+            btn.getAttribute('aria-label') || '',
+            btn.getAttribute('title') || '',
+            btn.textContent || ''
+        ].join(' ').replace(/\s+/g, ' ').trim();
+    }
+
+    function isUsableButton(btn) {
+        if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
+        const rect = btn.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function isGenerateButton(el) {
+        let node = el;
+        while (node && node !== document.body) {
+            if (node.tagName === 'BUTTON') {
+                const label = getButtonLabel(node);
+                if (/^Generate(?:\s+\d+\s+Images?|\s+Images?)?$/i.test(label) || /\bGenerate\s+\d+\s+Images?\b/i.test(label)) {
+                    return true;
+                }
+            }
+            node = node.parentElement;
+        }
+        return false;
+    }
+
+    function rememberSessionBlob(blob) {
+        if (!blob || blob._nsyncSessionRemembered) return;
+        blob._nsyncSessionRemembered = true;
+        window._nsyncSessionBlobs = window._nsyncSessionBlobs || [];
+        window._nsyncSessionBlobs.push(blob);
+        window._nsyncSessionItems = window._nsyncSessionItems || [];
+        const hashPromise = hashBlob(blob).catch(() => '');
+        window._nsyncSessionItems.push({
+            blob,
+            objectUrls: blob._nsyncObjectUrls || [],
+            hash: blob._nsyncHash || '',
+            hashPromise
+        });
+    }
+
+    function completeGeneratedWithoutHistory(reason) {
+        if (_nsyncPendingGenerations <= 0) return;
+        _nsyncPendingGenerations--;
+        console.log(`[N-Local] Generated image kept in session grid only (${reason})`);
+        if (batchOnGenerated) batchOnGenerated();
     }
 
     function processGeneratedImage(blob) {
@@ -3488,7 +3522,13 @@
             if (!chunks) return;
 
             const metaChunks = chunks.filter(c => c.type === 'tEXt' || c.type === 'iTXt');
-            if (metaChunks.length === 0) return;
+            if (metaChunks.length === 0) {
+                if (_nsyncPendingGenerations > 0) {
+                    rememberSessionBlob(blob);
+                    completeGeneratedWithoutHistory('no metadata chunks');
+                }
+                return;
+            }
 
             let isNovelAIGen = false;
             let jsonString = null;
@@ -3504,7 +3544,13 @@
                 }
             }
 
-            if (!isNovelAIGen || !jsonString) return;
+            if (!isNovelAIGen || !jsonString) {
+                if (_nsyncPendingGenerations > 0) {
+                    rememberSessionBlob(blob);
+                    completeGeneratedWithoutHistory('no NovelAI comment metadata');
+                }
+                return;
+            }
 
             // 生成パラメータ（JSON）を記憶し、UI再描画などで同じ画像が複数回処理されるのを防ぐ
             window._nsyncSeenJSONs = window._nsyncSeenJSONs || new Set();
@@ -3515,16 +3561,7 @@
             window._nsyncSeenJSONs.add(jsonString);
 
             // セッション画像グリッド表示用にBlobを記憶（ページリロードでリセットされる）
-            window._nsyncSessionBlobs = window._nsyncSessionBlobs || [];
-            window._nsyncSessionBlobs.push(blob);
-            window._nsyncSessionItems = window._nsyncSessionItems || [];
-            const hashPromise = hashBlob(blob).catch(() => '');
-            window._nsyncSessionItems.push({
-                blob,
-                objectUrls: blob._nsyncObjectUrls || [],
-                hash: blob._nsyncHash || '',
-                hashPromise
-            });
+            rememberSessionBlob(blob);
 
             try {
                 let apiData = {};
@@ -3672,9 +3709,23 @@
 
     function findGenerateButton() {
         return Array.from(document.querySelectorAll('button')).find(btn => {
-            const span = btn.querySelector('span');
-            return span && /^Generate \d+ Image/.test(span.textContent);
+            if (!isUsableButton(btn)) return false;
+            const label = getButtonLabel(btn);
+            return /^Generate(?:\s+\d+\s+Images?|\s+Images?)?$/i.test(label) || /\bGenerate\s+\d+\s+Images?\b/i.test(label);
         });
+    }
+
+    function pressGenerateButton(btn) {
+        const opts = { bubbles: true, cancelable: true, view: window };
+        try {
+            btn.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts)));
+            btn.dispatchEvent(new MouseEvent('mousedown', opts));
+            btn.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts)));
+            btn.dispatchEvent(new MouseEvent('mouseup', opts));
+            btn.dispatchEvent(new MouseEvent('click', opts));
+        } catch(e) {
+            btn.click();
+        }
     }
 
     function toggleBatchGeneration() {
@@ -3775,7 +3826,7 @@
 
         // ボタンをクリック（プログラム的なclickはpointerdownを発火しないため、手動でカウント）
         _nsyncPendingGenerations++;
-        genBtn.click();
+        pressGenerateButton(genBtn);
     }
 
 
@@ -3936,7 +3987,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.66 Ready');
+            console.log('[N-Local] v1.1.67 Ready');
         }
 
         const t = setInterval(() => {
