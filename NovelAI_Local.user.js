@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.68
+// @version      1.1.69
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -68,6 +68,7 @@
     let batchTarget = 0;
     let batchCount = 0;
     let batchOnGenerated = null; // 生成完了コールバック
+    let batchWaitAttempts = 0;
 
     // 生成ボタンが押された回数をカウントし、手動インポートと区別する
     let _nsyncPendingGenerations = 0;
@@ -3753,6 +3754,7 @@
         batchRunning = true;
         batchTarget = target;
         batchCount = 0;
+        batchWaitAttempts = 0;
 
         await requestWakeLock();
 
@@ -3770,6 +3772,7 @@
     function stopBatch() {
         batchRunning = false;
         batchOnGenerated = null;
+        batchWaitAttempts = 0;
 
         releaseWakeLock();
 
@@ -3805,10 +3808,21 @@
 
         const genBtn = findGenerateButton();
         if (!genBtn) {
-            showToast('⚠ Generate ボタンが見つかりません。中断します。', 'error');
-            stopBatch();
+            batchWaitAttempts++;
+            if (batchWaitAttempts <= 90) {
+                const progress = document.getElementById('nsync-batch-progress');
+                if (progress) {
+                    progress.textContent = `${batchCount}/${batchTarget} 待機中`;
+                    progress.classList.add('active');
+                }
+                setTimeout(() => runNextGeneration(), 1000);
+            } else {
+                showToast('⚠ Generate ボタンが再有効化されませんでした。中断します。', 'error');
+                stopBatch();
+            }
             return;
         }
+        batchWaitAttempts = 0;
 
         // 生成完了時のコールバックを登録
         batchOnGenerated = () => {
@@ -3987,7 +4001,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.68 Ready');
+            console.log('[N-Local] v1.1.69 Ready');
         }
 
         const t = setInterval(() => {
