@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.70
+// @version      1.1.71
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -3460,6 +3460,8 @@
             if (obj && obj instanceof Blob && obj.type === 'image/png') {
                 obj._nsyncObjectUrls = obj._nsyncObjectUrls || [];
                 obj._nsyncObjectUrls.push(url);
+                window._nsyncBlobUrlMap = window._nsyncBlobUrlMap || new Map();
+                window._nsyncBlobUrlMap.set(url, obj);
                 if (!obj._nsyncProcessed) {
                     obj._nsyncProcessed = true;
                     setTimeout(() => processGeneratedImage(obj), 50);
@@ -3476,6 +3478,136 @@
         }, true);
 
         console.log('[N-Local] URL.createObjectURL patched ✓');
+    }
+
+    function initJpegDownloadPopup() {
+        if (window._nsyncJpegDownloadPopupReady) return;
+        window._nsyncJpegDownloadPopupReady = true;
+
+        const style = document.createElement('style');
+        style.textContent = `
+            .nsync-jpeg-popup {
+                position: fixed; z-index: 1000002;
+                display: flex; gap: 6px; align-items: center;
+                padding: 6px; border-radius: 6px;
+                background: rgba(10, 9, 16, 0.92);
+                border: 1px solid #3d2960;
+                box-shadow: 0 6px 18px rgba(0,0,0,0.55);
+                font-family: 'Segoe UI', sans-serif;
+            }
+            .nsync-jpeg-popup button {
+                background: #1a1025; color: #c4a8e8;
+                border: 1px solid #6e40c9; border-radius: 4px;
+                padding: 6px 8px; font-size: 11px; font-weight: 700;
+                cursor: pointer; white-space: nowrap;
+            }
+            .nsync-jpeg-popup button:hover { background: #2d2040; color: #fff; }
+            .nsync-jpeg-popup .nsync-jpeg-close {
+                width: 24px; height: 24px; padding: 0;
+                display: flex; align-items: center; justify-content: center;
+                color: #8f7ab5;
+            }
+        `;
+        document.head.appendChild(style);
+
+        document.addEventListener('click', (e) => {
+            const existing = document.getElementById('nsync-jpeg-popup');
+            const inPopup = existing && existing.contains(e.target);
+            if (inPopup) return;
+
+            const img = e.target && e.target.tagName === 'IMG' ? e.target : null;
+            if (!img || img.closest('#nsync-panel, #nsync-grid-overlay, #nsync-grid-lightbox, #nsync-overlay')) {
+                if (existing) existing.remove();
+                return;
+            }
+
+            const src = img.currentSrc || img.src || '';
+            if (!src.startsWith('blob:') && !src.startsWith('data:image/')) {
+                if (existing) existing.remove();
+                return;
+            }
+
+            showJpegDownloadPopup(img);
+        }, true);
+    }
+
+    function showJpegDownloadPopup(img) {
+        document.getElementById('nsync-jpeg-popup')?.remove();
+
+        const rect = img.getBoundingClientRect();
+        if (rect.width < 80 || rect.height < 80) return;
+
+        const popup = document.createElement('div');
+        popup.id = 'nsync-jpeg-popup';
+        popup.className = 'nsync-jpeg-popup';
+        popup.innerHTML = `
+            <button type="button" class="nsync-jpeg-download">JPEG保存</button>
+            <button type="button" class="nsync-jpeg-close" title="閉じる">×</button>
+        `;
+        document.body.appendChild(popup);
+
+        const popupRect = popup.getBoundingClientRect();
+        const margin = 8;
+        let left = rect.right - popupRect.width - margin;
+        let top = rect.top + margin;
+        left = Math.max(margin, Math.min(left, window.innerWidth - popupRect.width - margin));
+        top = Math.max(margin, Math.min(top, window.innerHeight - popupRect.height - margin));
+        popup.style.left = `${left}px`;
+        popup.style.top = `${top}px`;
+
+        popup.querySelector('.nsync-jpeg-close').addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popup.remove();
+        });
+        popup.querySelector('.nsync-jpeg-download').addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            await downloadImageAsTwitterJpeg(img);
+            popup.remove();
+        });
+    }
+
+    async function downloadImageAsTwitterJpeg(img) {
+        try {
+            const src = img.currentSrc || img.src;
+            const sourceBlob = window._nsyncBlobUrlMap && window._nsyncBlobUrlMap.get(src);
+            const bitmap = sourceBlob
+                ? await createImageBitmap(sourceBlob)
+                : await new Promise((resolve, reject) => {
+                    const image = new Image();
+                    image.crossOrigin = 'anonymous';
+                    image.onload = () => resolve(image);
+                    image.onerror = () => reject(new Error('画像の読み込みに失敗しました'));
+                    image.src = src;
+                });
+
+            const canvas = document.createElement('canvas');
+            canvas.width = bitmap.width || img.naturalWidth;
+            canvas.height = bitmap.height || img.naturalHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            if (bitmap.close) bitmap.close();
+
+            const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.98));
+            if (!blob) throw new Error('JPEG変換に失敗しました');
+
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            a.href = url;
+            a.download = `novelai-twitter-jpeg-${stamp}.jpg`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 3000);
+            showToast('JPEGを書き出しました', 'ok');
+        } catch (err) {
+            console.error('[N-Local] JPEG download error:', err);
+            showToast('JPEG書き出しに失敗しました', 'error');
+        }
     }
 
     function getButtonLabel(btn) {
@@ -4013,10 +4145,11 @@
             LocalDB.init().then(() => {
                 buildUI();
                 patchObjectURL();
+                initJpegDownloadPopup();
             });
 
             
-            console.log('[N-Local] v1.1.70 Ready');
+            console.log('[N-Local] v1.1.71 Ready');
         }
 
         const t = setInterval(() => {
