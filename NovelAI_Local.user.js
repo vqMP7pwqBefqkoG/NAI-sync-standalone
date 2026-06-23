@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.71
+// @version      1.1.72
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -3582,28 +3582,56 @@
                     image.src = src;
                 });
 
-            const canvas = document.createElement('canvas');
-            canvas.width = bitmap.width || img.naturalWidth;
-            canvas.height = bitmap.height || img.naturalHeight;
-            const ctx = canvas.getContext('2d');
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            const maxSide = 4096;
+            const maxBytes = 5 * 1024 * 1024;
+            const sourceW = bitmap.width || img.naturalWidth;
+            const sourceH = bitmap.height || img.naturalHeight;
+            if (!sourceW || !sourceH) throw new Error('Invalid image size');
+
+            const encodeJpeg = (width, height, quality) => new Promise((resolve) => {
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, width, height);
+                ctx.drawImage(bitmap, 0, 0, width, height);
+                canvas.toBlob(resolve, 'image/jpeg', quality);
+            });
+
+            let scale = Math.min(1, maxSide / Math.max(sourceW, sourceH));
+            let outW = Math.max(1, Math.round(sourceW * scale));
+            let outH = Math.max(1, Math.round(sourceH * scale));
+            let blob = null;
+            let usedQuality = 0.98;
+
+            for (let resizeAttempt = 0; resizeAttempt < 8; resizeAttempt++) {
+                for (const q of [0.98, 0.95, 0.92, 0.9, 0.88, 0.85, 0.82, 0.8, 0.76, 0.72]) {
+                    usedQuality = q;
+                    blob = await encodeJpeg(outW, outH, q);
+                    if (blob && blob.size <= maxBytes) break;
+                }
+                if (blob && blob.size <= maxBytes) break;
+                scale *= 0.92;
+                outW = Math.max(1, Math.round(sourceW * scale));
+                outH = Math.max(1, Math.round(sourceH * scale));
+            }
+
             if (bitmap.close) bitmap.close();
 
-            const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.98));
-            if (!blob) throw new Error('JPEG変換に失敗しました');
+            if (!blob) throw new Error('JPEG conversion failed');
+            if (blob.size > maxBytes) throw new Error('Could not fit JPEG under 5MB');
 
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             const stamp = new Date().toISOString().replace(/[:.]/g, '-');
             a.href = url;
-            a.download = `novelai-twitter-jpeg-${stamp}.jpg`;
+            a.download = `novelai-x-jpeg-${outW}x${outH}-q${Math.round(usedQuality * 100)}-${stamp}.jpg`;
             document.body.appendChild(a);
             a.click();
             a.remove();
             setTimeout(() => URL.revokeObjectURL(url), 3000);
-            showToast('JPEGを書き出しました', 'ok');
+            showToast(`X向けJPEGを書き出しました (${outW}x${outH}, ${(blob.size / 1024 / 1024).toFixed(2)}MB)`, 'ok');
         } catch (err) {
             console.error('[N-Local] JPEG download error:', err);
             showToast('JPEG書き出しに失敗しました', 'error');
@@ -4149,7 +4177,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.71 Ready');
+            console.log('[N-Local] v1.1.72 Ready');
         }
 
         const t = setInterval(() => {
