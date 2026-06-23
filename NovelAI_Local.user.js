@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.69
+// @version      1.1.70
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -153,10 +153,32 @@
                 const req = index.openCursor(null, 'prev'); // 降順
                 
                 const sessionsMap = new Map();
+                const neededSessions = page * limit + 1;
+                const maxScannedRows = 2000;
+                let scannedRows = 0;
+                let resolved = false;
+
+                const finish = () => {
+                    if (resolved) return;
+                    resolved = true;
+                    const arr = Array.from(sessionsMap.values());
+                    const start = (page - 1) * limit;
+                    const data = arr.slice(start, start + limit);
+                    const hasMore = arr.length > start + limit;
+                    data.forEach(s => {
+                        if (s.items.length > 0) s.prompt = s.items[0].prompt;
+                        s.thumbnails = s.items.map(i => i.thumbnail);
+                        s.last_updated = s.latest_date;
+                    });
+
+                    resolve({ data, page, limit, total_pages: hasMore ? page + 1 : page });
+                };
                 
                 req.onsuccess = (e) => {
+                    if (resolved) return;
                     const cursor = e.target.result;
                     if (cursor) {
+                        scannedRows++;
                         const item = cursor.value;
                         const sid = item.session_id || 'unknown';
                         if (!sessionsMap.has(sid)) {
@@ -165,20 +187,13 @@
                         const s = sessionsMap.get(sid);
                         s.count++;
                         if (s.items.length < 4) s.items.push(item);
+                        if (sessionsMap.size >= neededSessions || scannedRows >= maxScannedRows) {
+                            finish();
+                            return;
+                        }
                         cursor.continue();
                     } else {
-                        // pagination
-                        const arr = Array.from(sessionsMap.values());
-                        const total_pages = Math.ceil(arr.length / limit) || 1;
-                        const start = (page - 1) * limit;
-                        const data = arr.slice(start, start + limit);
-                        data.forEach(s => {
-                            if (s.items.length > 0) s.prompt = s.items[0].prompt;
-                            s.thumbnails = s.items.map(i => i.thumbnail);
-                            s.last_updated = s.latest_date;
-                        });
-                        
-                        resolve({ data, page, limit, total_pages });
+                        finish();
                     }
                 };
             });
@@ -4001,7 +4016,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.69 Ready');
+            console.log('[N-Local] v1.1.70 Ready');
         }
 
         const t = setInterval(() => {
