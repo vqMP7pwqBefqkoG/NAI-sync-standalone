@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.74
+// @version      1.1.75
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -3378,29 +3378,60 @@
             const dataTransfer = new DataTransfer();
             dataTransfer.items.add(file);
 
+            const applyFileInput = (input) => {
+                input.files = dataTransfer.files;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+            };
+            const findRestoreFileInputs = () => {
+                const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+                return inputs.map((input, index) => {
+                    const accept = (input.getAttribute('accept') || '').toLowerCase();
+                    const label = [
+                        input.getAttribute('aria-label') || '',
+                        input.getAttribute('title') || '',
+                        input.id || '',
+                        input.name || '',
+                        input.closest('[aria-label]')?.getAttribute('aria-label') || '',
+                        input.closest('button,[role="button"],label')?.textContent || '',
+                        input.parentElement?.textContent || ''
+                    ].join(' ').toLowerCase();
+                    let score = 0;
+                    if (input.closest('.mobile-tray-contents')) score += 80;
+                    if (!input.multiple) score += 30;
+                    if (accept.includes('image') || accept.includes('png') || accept.includes('*/*')) score += 20;
+                    if (/import|upload|image|file|settings|metadata|インポート|アップロード|画像|設定|読み込み/.test(label)) score += 35;
+                    if (/mask|reference|vibe|director|素材|参照/.test(label)) score -= 25;
+                    const rect = input.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) score += 10;
+                    return { input, score, index };
+                }).filter(item => item.score > 0)
+                    .sort((a, b) => b.score - a.score || a.index - b.index)
+                    .map(item => item.input);
+            };
+
             // ─── スマホ判定 (タッチデバイス or 画面幅768px以下) ───
             const isMobile = ('ontouchstart' in window) || window.innerWidth <= 768;
 
             if (isMobile) {
-                // 診断データから判明: スマホ版インポートinputは
-                // ".mobile-tray-contents" 内の最初の non-multiple input (index 4)
-                const mobileInput = document.querySelector(
-                    '.mobile-tray-contents input[type="file"]:not([multiple])'
-                );
-                if (mobileInput) {
+                let restoredOnMobile = false;
+                for (const mobileInput of findRestoreFileInputs()) {
                     try {
-                        mobileInput.files = dataTransfer.files;
-                        mobileInput.dispatchEvent(new Event('change', { bubbles: true }));
+                        applyFileInput(mobileInput);
+                        restoredOnMobile = true;
                         showToast('✅ スマホ用インポートで設定を復元しました', 'ok');
+                        break;
                     } catch(e) {
                         console.error('[N-Local] mobile input injection error', e);
-                        showToast('❌ スマホ復元に失敗しました', 'error');
                     }
-                } else {
-                    showToast('⚠ スマホ用インポート枠が見つかりませんでした', 'error');
                 }
-                setTimeout(() => { window._nsyncIsRestoring = false; }, 2000);
-                return;
+                if (!restoredOnMobile) {
+                    console.warn('[N-Local] restore file input not found; falling back to drop events');
+                }
+                if (restoredOnMobile) {
+                    setTimeout(() => { window._nsyncIsRestoring = false; }, 2000);
+                    return;
+                }
             }
 
             // ─── PC用: 擬似D&D発火 ───
@@ -4202,7 +4233,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.74 Ready');
+            console.log('[N-Local] v1.1.75 Ready');
         }
 
         const t = setInterval(() => {
