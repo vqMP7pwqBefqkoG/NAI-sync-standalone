@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.75
+// @version      1.1.76
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -47,8 +47,9 @@
     // === 設定 ===
     // 配信先URL（タグデータ）
     // ============================================================
-    const TAGS_JSON_DANBOORU = 'https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/danbooru_tags.json';
-    const TAGS_JSON_E621 = 'https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/e621_tags.json';
+    const TAG_DATA_VERSION = '2026-06';
+    const TAGS_JSON_DANBOORU = `https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/danbooru_tags.json?v=${TAG_DATA_VERSION}`;
+    const TAGS_JSON_E621 = `https://raw.githubusercontent.com/vqMP7pwqBefqkoG/NAI-sync-standalone/main/e621_tags.json?v=${TAG_DATA_VERSION}`;
 
     // ============================================================
     // === グローバル状態 ===
@@ -315,10 +316,11 @@
 
         static async loadTags(source) {
             if (this.tagsCache[source]) return this.tagsCache[source];
+            const cacheKey = `${source}:${TAG_DATA_VERSION}`;
             
             // Check IndexedDB cache first
             const tx = this.db.transaction('tags', 'readonly');
-            const req = tx.objectStore('tags').get(source);
+            const req = tx.objectStore('tags').get(cacheKey);
             const cached = await new Promise(r => { req.onsuccess = () => r(req.result); });
             
             if (cached) {
@@ -334,7 +336,7 @@
                 const data = await res.json();
                 
                 const wTx = this.db.transaction('tags', 'readwrite');
-                wTx.objectStore('tags').put(data, source);
+                wTx.objectStore('tags').put(data, cacheKey);
                 
                 this.tagsCache[source] = data;
                 showToast('タグデータをキャッシュしました', 'ok');
