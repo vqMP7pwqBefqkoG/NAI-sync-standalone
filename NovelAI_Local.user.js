@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.73
+// @version      1.1.74
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -3457,7 +3457,7 @@
 
         window.URL.createObjectURL = function(obj) {
             const url = _origCreateObjectURL.apply(this, arguments);
-            if (obj && obj instanceof Blob && obj.type === 'image/png') {
+            if (obj && obj instanceof Blob && obj.type && obj.type.startsWith('image/')) {
                 obj._nsyncObjectUrls = obj._nsyncObjectUrls || [];
                 obj._nsyncObjectUrls.push(url);
                 window._nsyncBlobUrlMap = window._nsyncBlobUrlMap || new Map();
@@ -3652,6 +3652,7 @@
         return [
             btn.getAttribute('aria-label') || '',
             btn.getAttribute('title') || '',
+            btn.getAttribute('data-testid') || '',
             btn.textContent || ''
         ].join(' ').replace(/\s+/g, ' ').trim();
     }
@@ -3667,12 +3668,20 @@
         while (node && node !== document.body) {
             if (node.tagName === 'BUTTON') {
                 const label = getButtonLabel(node);
-                if (/^Generate\b/i.test(label) && /Images?/i.test(label)) {
+                if (isGenerateButtonLabel(label)) {
                     return true;
                 }
             }
             node = node.parentElement;
         }
+        return false;
+    }
+
+    function isGenerateButtonLabel(label) {
+        const normalized = String(label || '').replace(/\s+/g, ' ').trim();
+        if (!normalized) return false;
+        if (/\bGenerate\b/i.test(normalized) && !/\b(prompt|seed|settings?|history|grid)\b/i.test(normalized)) return true;
+        if (/生成/.test(normalized) && !/(履歴|設定|グリッド|プロンプト)/.test(normalized)) return true;
         return false;
     }
 
@@ -3705,7 +3714,13 @@
         reader.onload = (e) => {
             const uint8 = new Uint8Array(e.target.result);
             const chunks = parsePngChunks(uint8);
-            if (!chunks) return;
+            if (!chunks) {
+                if (_nsyncPendingGenerations > 0 && blob.type && blob.type.startsWith('image/')) {
+                    rememberSessionBlob(blob);
+                    completeGeneratedWithoutHistory(`non-png ${blob.type}`);
+                }
+                return;
+            }
 
             const metaChunks = chunks.filter(c => c.type === 'tEXt' || c.type === 'iTXt');
             if (metaChunks.length === 0) {
@@ -3897,7 +3912,7 @@
         return Array.from(document.querySelectorAll('button')).find(btn => {
             if (!isUsableButton(btn)) return false;
             const label = getButtonLabel(btn);
-            return /^Generate\b/i.test(label) && /Images?/i.test(label);
+            return isGenerateButtonLabel(label);
         });
     }
 
@@ -4187,7 +4202,7 @@
             });
 
             
-            console.log('[N-Local] v1.1.73 Ready');
+            console.log('[N-Local] v1.1.74 Ready');
         }
 
         const t = setInterval(() => {
