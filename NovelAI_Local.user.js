@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.76
+// @version      1.1.77
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
+// @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @connect      danbooru.donmai.us
 // @connect      e621.net
@@ -43,6 +44,13 @@
     // --- Inject Main Script into Page Context ---
     const mainScript = function() {
         'use strict';
+    if (window.__NLOCAL_MAIN_STARTED__) {
+        document.documentElement.dataset.nlocalMainStarted = '1';
+        return;
+    }
+    window.__NLOCAL_MAIN_STARTED__ = true;
+    document.documentElement.dataset.nlocalMainStarted = '1';
+
     // ============================================================
     // === 設定 ===
     // 配信先URL（タグデータ）
@@ -812,6 +820,9 @@
 
     function initNsyncPanelHeightLock() {
         applyNsyncPanelHeight();
+
+        if (window.__NLOCAL_HEIGHT_LOCK_STARTED__) return;
+        window.__NLOCAL_HEIGHT_LOCK_STARTED__ = true;
 
         window.addEventListener('resize', applyNsyncPanelHeight, { passive: true });
         if (window.visualViewport) {
@@ -4219,31 +4230,48 @@
 
         // 起動確認バッジ（15秒後に消える）
         const marker = document.createElement('div');
+        marker.id = 'nsync-startup-marker';
         marker.style.cssText = 'position:fixed;bottom:8px;right:8px;background:#7c3aed;color:#fff;padding:3px 8px;border-radius:5px;font-size:11px;z-index:999999;pointer-events:none;font-family:sans-serif;';
         marker.textContent = '⚡N';
         (document.body || document.documentElement).appendChild(marker);
         setTimeout(() => marker.remove(), 15000);
 
         let done = false;
-        function doInit() {
-            if (done) return; done = true;
-            
-            LocalDB.init().then(() => {
+        let starting = false;
+        async function doInit() {
+            if (done) return true;
+            if (starting || !document.body) return false;
+            starting = true;
+            try {
+                await LocalDB.init();
                 buildUI();
                 patchObjectURL();
                 initJpegDownloadPopup();
-            });
-
-            
-            console.log('[N-Local] v1.1.75 Ready');
+                done = true;
+                console.log('[N-Local] v1.1.77 Ready');
+                return true;
+            } catch (error) {
+                console.error('[N-Local] Initialization failed; retrying:', error);
+                return false;
+            } finally {
+                starting = false;
+            }
         }
 
+        const startedAt = Date.now();
         const t = setInterval(() => {
-            if (document.querySelector('.ProseMirror') || (document.body && document.body.children.length > 2)) {
-                clearInterval(t); doInit();
+            const pageReady = document.querySelector('.ProseMirror') ||
+                (document.readyState === 'complete' && document.body) ||
+                Date.now() - startedAt >= 5000;
+            if (pageReady) {
+                doInit().then(initialized => {
+                    if (initialized) clearInterval(t);
+                });
             }
-        }, 600);
-        setTimeout(() => { clearInterval(t); doInit(); }, 5000);
+        }, 500);
+        window.addEventListener('pageshow', () => {
+            if (!done) doInit();
+        }, { once: true });
     }
 
     init();
@@ -4252,7 +4280,26 @@
     
     };
 
-    const scriptEl = document.createElement('script');
-    scriptEl.textContent = '(' + mainScript.toString() + ')();\n//# sourceURL=NovelAI_Local_Injected.js';
-    document.head.appendChild(scriptEl);
+    function injectMainScript() {
+        const root = document.documentElement;
+        if (!root) return false;
+        if (root.dataset.nlocalMainStarted === '1') return true;
+        const target = document.head || root;
+        if (!target) return false;
+
+        const scriptEl = document.createElement('script');
+        scriptEl.textContent = '(' + mainScript.toString() + ')();\n//# sourceURL=NovelAI_Local_Injected.js';
+        target.appendChild(scriptEl);
+        scriptEl.remove();
+        return root.dataset.nlocalMainStarted === '1';
+    }
+
+    if (!injectMainScript()) {
+        const startedAt = Date.now();
+        const retryTimer = setInterval(() => {
+            if (injectMainScript() || Date.now() - startedAt >= 30000) {
+                clearInterval(retryTimer);
+            }
+        }, 250);
+    }
 })();
