@@ -1,0 +1,12 @@
+{
+  "name": "novelai-local-standalone",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.js",
+    "test:browser": "node test/browser-fixture.js",
+    "test": "node scripts/build.js --check && node --check NovelAI_Local.user.js && node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
+  }
+}

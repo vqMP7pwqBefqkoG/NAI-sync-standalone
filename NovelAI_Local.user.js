@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Local Panel (N-Local)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.77
+// @version      1.2.0
 // @description  スマホ単独動作版のNovelAI設定同期ツール。サーバー不要で履歴保存・タグサジェストが可能です。
 // @author       Antigravity
 // @match        https://novelai.net/*
@@ -67,7 +67,8 @@
     let currentPage = 1;
     let currentSearch = '';
     let LIMIT = 80;
-    let historyData = [];
+    let viewedSessionId = null;
+    let listRequestId = 0;
     
     // タグ画像キャッシュ (セッション内のみ)
     const tagImageCache = { danbooru: {}, e621: {} };
@@ -80,7 +81,9 @@
     let batchWaitAttempts = 0;
 
     // 生成ボタンが押された回数をカウントし、手動インポートと区別する
-    let _nsyncPendingGenerations = 0;
+    let generation = null;
+    let generationTimer = null;
+    let generationSettleTimer = null;
 
     // ブラウザセッションID (ページロード時に一意に生成)
     const CURRENT_SESSION_ID = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -106,222 +109,379 @@
     // ============================================================
     // === ローカルデータベース (IndexedDB) ===
     // ============================================================
-    class LocalDB {
-        static db = null;
-        static tagsCache = { danbooru: null, e621: null };
+    // BEGIN LOCAL STORAGE
+// Embedded into the installable userscript by scripts/build.js.
+class HistoryStorage {
+    static db = null;
+    static opening = null;
+    static writes = Promise.resolve();
+    static migrating = false;
+    static maxMetadata = 8 * 1024 * 1024;
+    static viewIds = null;
+    static viewRevision = 0;
+    static beginView() { this.viewIds = null; this.viewRevision++; }
+    static async ensureView() {
+        if (this.viewIds) return this.viewIds;
+        const revision = this.viewRevision;
+        const ids = await this.request('history', store => store.getAllKeys());
+        const snapshot = new Set(ids);
+        if (revision === this.viewRevision) this.viewIds = snapshot;
+        return snapshot;
+    }
 
-        static init() {
-            return new Promise((resolve, reject) => {
-                const req = indexedDB.open('NovelAILocalDB', 1);
-                req.onupgradeneeded = (e) => {
-                    const db = e.target.result;
-                    if (!db.objectStoreNames.contains('history')) {
-                        const store = db.createObjectStore('history', { keyPath: 'id' });
-                        store.createIndex('session_id', 'session_id');
-                        store.createIndex('created_at', 'created_at');
-                    }
-                    if (!db.objectStoreNames.contains('favorites')) {
-                        const store = db.createObjectStore('favorites', { keyPath: 'fav_id' });
-                        store.createIndex('history_id', 'history_id');
-                    }
-                    if (!db.objectStoreNames.contains('tags')) {
-                        db.createObjectStore('tags');
-                    }
-                };
-                req.onsuccess = (e) => {
-                    this.db = e.target.result;
-                    resolve();
-                };
-                req.onerror = () => reject(req.error);
-            });
-        }
-
-        static generateId() {
-            return Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-        }
-
-        static addHistory(item) {
-            return new Promise((resolve) => {
-                const tx = this.db.transaction('history', 'readwrite');
-                const store = tx.objectStore('history');
-                const id = this.generateId();
-                item.id = id;
-                if (!item.created_at) {
-                    item.created_at = new Date().toISOString();
+    static init() {
+        if (this.db) return Promise.resolve();
+        if (this.opening) return this.opening;
+        this.opening = new Promise((resolve, reject) => {
+            const request = indexedDB.open('NovelAILocalDB', 2);
+            let blocked = false;
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                const history = db.objectStoreNames.contains('history') ? request.transaction.objectStore('history') : db.createObjectStore('history', { keyPath: 'id' });
+                for (const [name, key] of [['session_id', 'session_id'], ['created_at', 'created_at'], ['session_created', ['session_id', 'created_at']]]) {
+                    if (!history.indexNames.contains(name)) history.createIndex(name, key);
                 }
-                store.add(item);
-                tx.oncomplete = () => resolve(id);
-            });
+                const favorites = db.objectStoreNames.contains('favorites') ? request.transaction.objectStore('favorites') : db.createObjectStore('favorites', { keyPath: 'fav_id' });
+                if (!favorites.indexNames.contains('history_id')) favorites.createIndex('history_id', 'history_id');
+                if (!db.objectStoreNames.contains('tags')) db.createObjectStore('tags');
+                if (!db.objectStoreNames.contains('assets')) db.createObjectStore('assets', { keyPath: 'id' });
+            };
+            request.onblocked = () => { blocked = true; reject(new Error('他のNovelAIタブを閉じてから再読み込みしてください')); };
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+                if (blocked) { request.result.close(); return; }
+                this.db = request.result;
+                this.db.onversionchange = () => { this.db.close(); this.db = null; };
+                resolve();
+            };
+        }).finally(() => { this.opening = null; });
+        return this.opening;
+    }
+
+    static transaction(names, mode, operation) {
+        return new Promise((resolve, reject) => {
+            const tx = this.db.transaction(names, mode);
+            const stores = Object.fromEntries(names.map(name => [name, tx.objectStore(name)]));
+            let result;
+            tx.oncomplete = () => resolve(result);
+            tx.onabort = tx.onerror = () => reject(tx.error || new Error('IndexedDB transaction failed'));
+            try { operation(stores, value => { result = value; }); }
+            catch (error) { tx.abort(); reject(error); }
+        });
+    }
+
+    static request(name, operation) {
+        return this.transaction([name], 'readonly', (stores, set) => {
+            const request = operation(stores[name]);
+            request.onsuccess = () => set(request.result);
+        });
+    }
+
+    static mutate(work) {
+        const run = () => typeof navigator !== 'undefined' && navigator.locks ? navigator.locks.request('nlocal-storage-write', work) : work();
+        const result = this.writes.then(run);
+        this.writes = result.catch(() => {});
+        return result;
+    }
+
+    static generateId() { return crypto.randomUUID(); }
+
+    static async transform(blob, decompress = false) {
+        const Stream = decompress ? DecompressionStream : CompressionStream;
+        const reader = blob.stream().pipeThrough(new Stream('gzip')).getReader();
+        const parts = []; let total = 0;
+        try {
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                total += value.length;
+                if (total > this.maxMetadata) { await reader.cancel(); throw new Error('メタデータの上限を超えています'); }
+                parts.push(value);
+            }
+        } finally { reader.releaseLock(); }
+        return new Blob(parts);
+    }
+
+    static decodeImage(uri) {
+        const match = /^data:(image\/(?:png|webp|jpeg));base64,([A-Za-z0-9+/=]+)$/.exec(uri || '');
+        if (!match) throw new Error('無効な画像データです');
+        return new Blob([base64ToUint8(match[2])], { type: match[1] });
+    }
+
+    static async pack(row) {
+        const record = { ...row };
+        if (!record.thumbnail) return { record, asset: null };
+        let image, meta;
+        if (record.thumbnail.startsWith('{')) {
+            const value = JSON.parse(record.thumbnail);
+            image = this.decodeImage(value.image);
+            if (typeof value.meta !== 'string' || !/^[A-Za-z0-9+/=]*$/.test(value.meta)) throw new Error('無効なメタデータです');
+            meta = new Blob([base64ToUint8(value.meta)]);
+        } else {
+            image = this.decodeImage(record.thumbnail);
         }
+        if (meta && meta.size > this.maxMetadata) throw new Error('メタデータが大きすぎます');
+        let encoding = 'raw';
+        if (meta && typeof CompressionStream !== 'undefined' && typeof DecompressionStream !== 'undefined') {
+            const compressed = await this.transform(meta);
+            const restored = new Uint8Array(await (await this.transform(compressed, true)).arrayBuffer());
+            const original = new Uint8Array(await meta.arrayBuffer());
+            if (restored.length !== original.length || restored.some((byte, i) => byte !== original[i])) throw new Error('圧縮の検証に失敗しました');
+            meta = compressed; encoding = 'gzip';
+        }
+        delete record.thumbnail;
+        delete record._metaB64;
+        record.storage_version = 2;
+        return { record, asset: { id: record.id, image, metadata: meta || null, encoding } };
+    }
 
-        static getSessions(page, limit) {
-            return new Promise((resolve) => {
-                const tx = this.db.transaction('history', 'readonly');
-                const store = tx.objectStore('history');
-                const index = store.index('created_at');
-                const req = index.openCursor(null, 'prev'); // 降順
-                
-                const sessionsMap = new Map();
-                const neededSessions = page * limit + 1;
-                const maxScannedRows = 2000;
-                let scannedRows = 0;
-                let resolved = false;
+    static async imageUri(blob) { return `data:${blob.type};base64,${uint8ToBase64(new Uint8Array(await blob.arrayBuffer()))}`; }
 
-                const finish = () => {
-                    if (resolved) return;
-                    resolved = true;
-                    const arr = Array.from(sessionsMap.values());
-                    const start = (page - 1) * limit;
-                    const data = arr.slice(start, start + limit);
-                    const hasMore = arr.length > start + limit;
-                    data.forEach(s => {
-                        if (s.items.length > 0) s.prompt = s.items[0].prompt;
-                        s.thumbnails = s.items.map(i => i.thumbnail);
-                        s.last_updated = s.latest_date;
+    static async restoreAsset(asset) {
+        const image = await this.imageUri(asset.image);
+        if (!asset.metadata) return image;
+        const meta = asset.encoding === 'gzip' ? await this.transform(asset.metadata, true) : asset.metadata;
+        return JSON.stringify({ image, meta: uint8ToBase64(new Uint8Array(await meta.arrayBuffer())) });
+    }
+
+    static addHistory(item) {
+        return this.mutate(async () => {
+            const id = item.event_id || item.id || this.generateId();
+            const existing = await this.request('history', store => store.get(id));
+            if (existing) return id;
+            const row = { ...item, id, session_id: item.session_id || 'unknown',
+                created_at: item.captured_at || item.created_at || new Date().toISOString(), saved_at: new Date().toISOString() };
+            const { record, asset } = await this.pack(row);
+            await this.transaction(['history', 'assets'], 'readwrite', stores => {
+                stores.history.add(record);
+                if (asset) stores.assets.put(asset);
+            });
+            return id;
+        });
+    }
+
+    static async getHistoryItem(id) {
+        const row = await this.request('history', store => store.get(id));
+        if (!row) return null;
+        const asset = await this.request('assets', store => store.get(id));
+        return asset ? { ...row, thumbnail: await this.restoreAsset(asset) } : row;
+    }
+
+    // Cursor scans keep only the requested page or session summaries in memory.
+    static scan(name, index, range, visit) {
+        return this.transaction([name], 'readonly', stores => {
+            const source = index ? stores[name].index(index) : stores[name];
+            const request = source.openCursor(range, 'prev');
+            request.onsuccess = () => {
+                const cursor = request.result;
+                if (cursor && visit(cursor.value) !== false) cursor.continue();
+            };
+        });
+    }
+
+    static async listRows(rows, includeFavorites = true) {
+        const favorites = includeFavorites ? await this.request('favorites', store => store.getAll()) : [];
+        const favoriteMap = new Map(favorites.map(f => [f.history_id, f.fav_id]));
+        return Promise.all(rows.map(async row => {
+            const asset = await this.request('assets', store => store.get(row.id));
+            let thumbnail = row.thumbnail || null;
+            if (asset) thumbnail = await this.imageUri(asset.image);
+            else if (thumbnail?.startsWith('{')) thumbnail = JSON.parse(thumbnail).image;
+            return { id: row.id, prompt: row.prompt, model: row.model, session_id: row.session_id, created_at: row.created_at,
+                thumbnail, fav_id: row.fav_id || favoriteMap.get(row.id) || null };
+        }));
+    }
+
+    static async getSessions(page, limit) {
+        const viewIds = await this.ensureView();
+        const sessions = new Map();
+        await this.scan('history', 'created_at', null, row => {
+            if (!viewIds.has(row.id)) return;
+            const id = row.session_id || 'unknown';
+            if (!sessions.has(id)) sessions.set(id, { session_id: id, count: 0, last_updated: row.created_at, ids: [] });
+            const session = sessions.get(id); session.count++;
+            if (session.ids.length < 4) session.ids.push(row.id);
+        });
+        const data = [...sessions.values()].slice((page - 1) * limit, page * limit);
+        for (const session of data) {
+            const rows = await Promise.all(session.ids.map(id => this.request('history', store => store.get(id))));
+            session.thumbnails = (await this.listRows(rows, false)).map(row => row.thumbnail);
+            delete session.ids;
+        }
+        return { data, page, total_pages: Math.max(1, Math.ceil(sessions.size / limit)) };
+    }
+
+    static matches(row, query) {
+        const parts = query.toLowerCase().split('*');
+        const text = ((row.prompt || '') + '\n' + (row.char_prompts_json || '')).toLowerCase();
+        let offset = 0;
+        for (const part of parts) { const at = text.indexOf(part, offset); if (at < 0) return false; offset = at + part.length; }
+        return true;
+    }
+
+    static async pageHistory(page, limit, predicate, index = 'created_at', range = null) {
+        const viewIds = await this.ensureView();
+        const rows = []; let count = 0;
+        await this.scan('history', index, range, row => {
+            if (!viewIds.has(row.id) || !predicate(row)) return;
+            if (count >= (page - 1) * limit && rows.length < limit) rows.push(row);
+            count++;
+        });
+        return { data: await this.listRows(rows), page, total_pages: Math.max(1, Math.ceil(count / limit)) };
+    }
+    static searchHistory(query, page, limit) { return this.pageHistory(page, limit, row => this.matches(row, query)); }
+    static getSessionDetail(id, page = 1, limit = 80) {
+        return id === 'unknown' ? this.pageHistory(page, limit, row => !row.session_id || row.session_id === id) :
+            this.pageHistory(page, limit, () => true, 'session_created', IDBKeyRange.bound([id], [id, '\uffff']));
+    }
+
+    static addFavorite(historyId) {
+        return this.mutate(() => this.transaction(['history', 'favorites'], 'readwrite', (stores, set) => {
+            const history = stores.history.get(historyId);
+            history.onsuccess = () => {
+                if (!history.result) { set(null); return; }
+                const existing = stores.favorites.index('history_id').get(historyId);
+                existing.onsuccess = () => {
+                    if (existing.result) { set({ fav_id: existing.result.fav_id }); return; }
+                    const favorite = { fav_id: this.generateId(), history_id: historyId, label: '', added_at: new Date().toISOString() };
+                    stores.favorites.add(favorite); set({ fav_id: favorite.fav_id });
+                };
+            };
+        }));
+    }
+    static removeFavorite(id) { return this.mutate(() => this.transaction(['favorites'], 'readwrite', stores => stores.favorites.delete(id))); }
+    static async checkFavorite(id) {
+        const row = await this.request('favorites', store => store.index('history_id').get(id));
+        return { is_favorite: !!row, fav_id: row?.fav_id };
+    }
+    static async getFavorites(page, limit) {
+        const favorites = await this.request('favorites', store => store.getAll());
+        favorites.sort((a, b) => (b.added_at || '').localeCompare(a.added_at || '') || String(b.fav_id).localeCompare(String(a.fav_id)));
+        const rows = await Promise.all(favorites.slice((page - 1) * limit, page * limit).map(async f => {
+            const row = await this.request('history', store => store.get(f.history_id));
+            return { ...(row || f), fav_id: f.fav_id };
+        }));
+        return { data: await this.listRows(rows), page, total_pages: Math.max(1, Math.ceil(favorites.length / limit)) };
+    }
+    static clearAll() {
+        return this.mutate(() => this.transaction(['history', 'favorites', 'assets'], 'readwrite', stores => {
+            for (const store of Object.values(stores)) store.clear();
+        }));
+    }
+
+    static async migrateLegacy(onProgress = () => {}) {
+        if (this.migrating) return 0;
+        this.migrating = true;
+        let converted = 0, after;
+        try {
+            while (true) {
+                const batch = await this.request('history', store => store.getAll(after === undefined ? null : IDBKeyRange.lowerBound(after, true), 25));
+                if (!batch.length) break;
+                for (const candidate of batch) {
+                    after = candidate.id;
+                    if (!candidate.thumbnail) continue;
+                    await this.mutate(async () => {
+                        const row = await this.request('history', store => store.get(candidate.id));
+                        if (!row?.thumbnail) return;
+                        const { record, asset } = await this.pack(row);
+                        await this.transaction(['history', 'assets'], 'readwrite', stores => { stores.history.put(record); stores.assets.put(asset); });
+                        converted++;
                     });
-
-                    resolve({ data, page, limit, total_pages: hasMore ? page + 1 : page });
-                };
-                
-                req.onsuccess = (e) => {
-                    if (resolved) return;
-                    const cursor = e.target.result;
-                    if (cursor) {
-                        scannedRows++;
-                        const item = cursor.value;
-                        const sid = item.session_id || 'unknown';
-                        if (!sessionsMap.has(sid)) {
-                            sessionsMap.set(sid, { session_id: sid, count: 0, latest_date: item.created_at, items: [] });
-                        }
-                        const s = sessionsMap.get(sid);
-                        s.count++;
-                        if (s.items.length < 4) s.items.push(item);
-                        if (sessionsMap.size >= neededSessions || scannedRows >= maxScannedRows) {
-                            finish();
-                            return;
-                        }
+                }
+                onProgress(converted);
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
+            await this.mutate(() => this.transaction(['history', 'favorites'], 'readwrite', stores => {
+                const request = stores.favorites.openCursor();
+                request.onsuccess = () => {
+                    const cursor = request.result;
+                    if (!cursor) return;
+                    const f = cursor.value;
+                    const exists = stores.history.get(f.history_id);
+                    exists.onsuccess = () => {
+                        // Preserve legacy orphan favorites, which may be the only remaining copy.
+                        if (exists.result) cursor.update({ fav_id: f.fav_id, history_id: f.history_id, label: f.label || '', added_at: f.added_at });
                         cursor.continue();
-                    } else {
-                        finish();
-                    }
+                    };
                 };
-            });
-        }
+            }));
+            return converted;
+        } finally { this.migrating = false; }
+    }
 
-        static searchHistory(query, page, limit) {
-            return new Promise((resolve) => {
-                const tx = this.db.transaction('history', 'readonly');
-                const store = tx.objectStore('history');
-                const index = store.index('created_at');
-                const req = index.openCursor(null, 'prev');
-                
-                const results = [];
-                const q = query.toLowerCase();
-                
-                req.onsuccess = (e) => {
-                    const cursor = e.target.result;
-                    if (cursor) {
-                        const item = cursor.value;
-                        if ((item.prompt && item.prompt.toLowerCase().includes(q)) || (item.char_prompts_json && item.char_prompts_json.toLowerCase().includes(q))) {
-                            results.push(item);
-                        }
-                        cursor.continue();
-                    } else {
-                        const total_pages = Math.ceil(results.length / limit) || 1;
-                        const start = (page - 1) * limit;
-                        resolve({ data: results.slice(start, start + limit), page, limit, total_pages });
-                    }
-                };
-            });
+    static async backupBlob() {
+        const data = await this.transaction(['history', 'favorites', 'assets'], 'readonly', (stores, set) => {
+            const result = { version: 2 };
+            for (const name of ['history', 'favorites', 'assets']) {
+                const request = stores[name].getAll(); request.onsuccess = () => { result[name] = request.result; };
+            }
+            set(result);
+        });
+        const parts = ['{"version":2,"history":', JSON.stringify(data.history), ',"favorites":', JSON.stringify(data.favorites), ',"assets":['];
+        for (let i = 0; i < data.assets.length; i++) {
+            const asset = data.assets[i];
+            if (i) parts.push(',');
+            parts.push(JSON.stringify({ id: asset.id, image: await this.imageUri(asset.image), encoding: asset.encoding,
+                meta: asset.metadata ? uint8ToBase64(new Uint8Array(await asset.metadata.arrayBuffer())) : null }));
         }
-
-        static getSessionDetail(sessionId) {
-            return new Promise((resolve) => {
-                const tx = this.db.transaction('history', 'readonly');
-                const index = tx.objectStore('history').index('session_id');
-                const req = index.getAll(sessionId);
-                req.onsuccess = () => {
-                    // 生成順（新しい順）に並び替え
-                    const sorted = req.result.sort((a,b) => b.created_at.localeCompare(a.created_at));
-                    resolve(sorted);
-                };
-            });
+        parts.push(']}');
+        return new Blob(parts, { type: 'application/json' });
+    }
+    static async exportData() {
+        const blob = await this.backupBlob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a'); link.href = url; link.download = `nsync_local_backup_${Date.now()}.json`;
+        link.click(); setTimeout(() => URL.revokeObjectURL(url), 3000);
+        showToast('バックアップをダウンロードしました', 'ok');
+    }
+    static decodeAsset(asset) {
+        if (!['gzip', 'raw'].includes(asset.encoding)) throw new Error('未対応の圧縮形式です');
+        if (asset.meta != null && (typeof asset.meta !== 'string' || !/^[A-Za-z0-9+/=]*$/.test(asset.meta))) throw new Error('無効なメタデータです');
+        return { id: asset.id, image: this.decodeImage(asset.image), encoding: asset.encoding,
+            metadata: asset.meta == null ? null : new Blob([base64ToUint8(asset.meta)]) };
+    }
+    static async readBackup(file) {
+        const data = JSON.parse(await file.text());
+        if (!Array.isArray(data.history) || !Array.isArray(data.favorites) || (data.version != null && ![1, 2].includes(data.version))) throw new Error('無効なバックアップです');
+        if (data.version === 2 && !Array.isArray(data.assets)) throw new Error('画像データがありません');
+        return data;
+    }
+    static async importData(file) {
+        const data = await this.readBackup(file);
+        // Validate and convert everything BEFORE the clearing transaction.
+        const assets = new Map();
+        for (const encoded of data.assets || []) {
+            if (assets.has(encoded.id)) throw new Error('画像IDが重複しています');
+            const asset = this.decodeAsset(encoded); await this.restoreAsset(asset); assets.set(asset.id, asset);
         }
-
-        static getHistoryItem(id) {
-            return new Promise((resolve) => {
-                const tx = this.db.transaction('history', 'readonly');
-                const req = tx.objectStore('history').get(id);
-                req.onsuccess = () => resolve(req.result);
-            });
+        const histories = [], ids = new Set(), favorites = [], favoriteIds = new Set();
+        for (const row of data.history) {
+            if (!row || !['string', 'number'].includes(typeof row.id) || ids.has(row.id) || typeof row.created_at !== 'string' || !Number.isFinite(Date.parse(row.created_at))) throw new Error('無効な履歴ID・日時です');
+            ids.add(row.id);
+            const { record, asset } = await this.pack(row);
+            if (asset) assets.set(row.id, asset);
+            if (record.storage_version === 2 && !assets.has(row.id)) throw new Error('履歴の画像が不足しています');
+            histories.push(record);
         }
-
-        static addFavorite(historyId) {
-            return new Promise(async (resolve) => {
-                const item = await this.getHistoryItem(historyId);
-                if (!item) return resolve(null);
-                
-                const tx = this.db.transaction('favorites', 'readwrite');
-                const id = this.generateId();
-                tx.objectStore('favorites').add({
-                    fav_id: id,
-                    history_id: historyId,
-                    label: '',
-                    added_at: new Date().toISOString(),
-                    ...item
-                });
-                tx.oncomplete = () => resolve({ fav_id: id });
-            });
+        for (const f of data.favorites) {
+            if (!f || !['string', 'number'].includes(typeof f.fav_id) || favoriteIds.has(f.fav_id)) throw new Error('無効なお気に入りIDです');
+            favoriteIds.add(f.fav_id);
+            if (ids.has(f.history_id)) favorites.push({ fav_id: f.fav_id, history_id: f.history_id, label: f.label || '', added_at: f.added_at });
+            else if (f.thumbnail) { await this.pack(f); favorites.push(f); }
+            else throw new Error('お気に入りの参照先がありません');
         }
+        return this.mutate(() => this.transaction(['history', 'favorites', 'assets'], 'readwrite', stores => {
+            for (const store of Object.values(stores)) store.clear();
+            histories.forEach(row => stores.history.add(row));
+            favorites.forEach(row => stores.favorites.add(row));
+            assets.forEach(asset => stores.assets.add(asset));
+        }));
+    }
+}
 
-        static removeFavorite(favId) {
-            return new Promise((resolve) => {
-                const tx = this.db.transaction('favorites', 'readwrite');
-                tx.objectStore('favorites').delete(favId);
-                tx.oncomplete = () => resolve();
-            });
-        }
-
-        static clearAll() {
-            return new Promise((resolve) => {
-                const tx = this.db.transaction(['history', 'favorites'], 'readwrite');
-                tx.objectStore('history').clear();
-                tx.objectStore('favorites').clear();
-                tx.oncomplete = () => resolve();
-            });
-        }
-
-        static getFavorites(page, limit) {
-            return new Promise((resolve) => {
-                const tx = this.db.transaction('favorites', 'readonly');
-                const req = tx.objectStore('favorites').openCursor(null, 'prev');
-                const results = [];
-                req.onsuccess = (e) => {
-                    const cursor = e.target.result;
-                    if (cursor) {
-                        results.push(cursor.value);
-                        cursor.continue();
-                    } else {
-                        const total_pages = Math.ceil(results.length / limit) || 1;
-                        const start = (page - 1) * limit;
-                        resolve({ data: results.slice(start, start + limit), page, limit, total_pages });
-                    }
-                };
-            });
-        }
-
-        static checkFavorite(historyId) {
-            return new Promise((resolve) => {
-                const tx = this.db.transaction('favorites', 'readonly');
-                const index = tx.objectStore('favorites').index('history_id');
-                const req = index.get(historyId);
-                req.onsuccess = () => {
-                    if (req.result) resolve({ is_favorite: true, fav_id: req.result.fav_id });
-                    else resolve({ is_favorite: false });
-                };
-            });
-        }
-
+    // END LOCAL STORAGE
+    class LocalDB extends HistoryStorage {
+        static tagsCache = { danbooru: null, e621: null };
         static async loadTags(source) {
             if (this.tagsCache[source]) return this.tagsCache[source];
             const cacheKey = `${source}:${TAG_DATA_VERSION}`;
@@ -329,7 +489,7 @@
             // Check IndexedDB cache first
             const tx = this.db.transaction('tags', 'readonly');
             const req = tx.objectStore('tags').get(cacheKey);
-            const cached = await new Promise(r => { req.onsuccess = () => r(req.result); });
+            const cached = await new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
             
             if (cached) {
                 this.tagsCache[source] = cached;
@@ -341,6 +501,7 @@
             const url = source === 'danbooru' ? TAGS_JSON_DANBOORU : TAGS_JSON_E621;
             try {
                 const res = await fetch(url);
+                if (!res.ok) throw new Error('Tag download HTTP ' + res.status);
                 const data = await res.json();
                 
                 const wTx = this.db.transaction('tags', 'readwrite');
@@ -381,59 +542,6 @@
             return results.slice(0, 50).map(t => ({ name: t[0], post_count: t[1], category: t[2] }));
         }
         
-        static async exportData() {
-            const exportObj = { history: [], favorites: [] };
-            
-            await new Promise(r => {
-                const req = this.db.transaction('history').objectStore('history').getAll();
-                req.onsuccess = () => { exportObj.history = req.result; r(); };
-            });
-            await new Promise(r => {
-                const req = this.db.transaction('favorites').objectStore('favorites').getAll();
-                req.onsuccess = () => { exportObj.favorites = req.result; r(); };
-            });
-            
-            const blob = new Blob([JSON.stringify(exportObj)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `nsync_local_backup_${new Date().getTime()}.json`;
-            a.click();
-            URL.revokeObjectURL(url);
-            showToast('バックアップをダウンロードしました', 'ok');
-        }
-        
-        static async importData(file) {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = async (e) => {
-                    try {
-                        const data = JSON.parse(e.target.result);
-                        if (!data.history || !data.favorites) throw new Error("無効なバックアップファイルです");
-                        
-                        const tx = this.db.transaction(['history', 'favorites'], 'readwrite');
-                        const hStore = tx.objectStore('history');
-                        const fStore = tx.objectStore('favorites');
-                        
-                        // Clear existing
-                        hStore.clear();
-                        fStore.clear();
-                        
-                        data.history.forEach(item => hStore.add(item));
-                        data.favorites.forEach(item => fStore.add(item));
-                        
-                        tx.oncomplete = () => {
-                            showToast('データを復元しました！リロードしてください。', 'ok');
-                            resolve();
-                        };
-                    } catch (err) {
-                        showToast('復元に失敗: ' + err.message, 'error');
-                        reject(err);
-                    }
-                };
-                reader.readAsText(file);
-            });
-        }
     }
 
     // === スタイル注入 ===
@@ -931,8 +1039,10 @@
                 <!-- 一括置換機能 -->
                 <button id="nsync-replace-btn" style="width:100%;padding:10px;background:#2d2040;color:#c4a8e8;border:none;border-radius:5px;cursor:pointer;margin-bottom:8px;">🔍 一括置換</button>
                 
+                <label style="display:block;margin-bottom:6px;">生成回数 <input id="nsync-batch-input" type="number" min="1" max="10000" value="10" style="width:70px;"></label>
+                <span id="nsync-batch-progress"></span>
                 <button id="nsync-batch-btn" style="width:100%;padding:10px;background:#1a1025;color:#c4a8e8;border:1px solid #3d2960;border-radius:5px;cursor:pointer;">
-                    ▶️ バッチ生成 (10回)
+                    ▶ 開始
                 </button>
             </div>
         `;
@@ -947,8 +1057,8 @@
 
         // イベント設定
         panel.querySelector('#nsync-close').addEventListener('click', togglePanel);
-        panel.querySelector('#nsync-prev').addEventListener('click', () => loadList(currentPage - 1));
-        panel.querySelector('#nsync-next').addEventListener('click', () => loadList(currentPage + 1));
+        panel.querySelector('#nsync-prev').addEventListener('click', () => loadPage(currentPage - 1));
+        panel.querySelector('#nsync-next').addEventListener('click', () => loadPage(currentPage + 1));
 
         // タブ切り替え
         panel.querySelectorAll('.nsync-tab-btn').forEach(btn => {
@@ -977,7 +1087,6 @@
         });
 
         // 診断ボタン
-        // panel.querySelector('#nsync-diagnose-btn').addEventListener('click', inspectFileInputs);
 
         // バッチ生成
         panel.querySelector('#nsync-batch-btn').addEventListener('click', toggleBatchGeneration);
@@ -1021,7 +1130,7 @@
                     <!-- バックアップ -->
                     <h4 style="color:#9d7fd4;margin:0 0 10px 0;font-size:11px;text-align:left;">💾 ローカルデータ管理</h4>
                     <p style="font-size:10px;color:#888;margin-bottom:15px;text-align:left;line-height:1.4;">
-                        スマホ単独版では画像履歴はブラウザ内部に保存されます。キャッシュクリア等で消える前にZIP形式(JSON)でエクスポートして保護してください。
+                        スマホ単独版では画像履歴はブラウザ内部に保存されます。サイトデータの削除等で消える前にJSON形式でエクスポートして保護してください。
                     </p>
                     <button id="nsync-do-export" style="width:100%;padding:10px;margin-bottom:10px;background:#1a1025;color:#c4a8e8;border:1px solid #3d2960;border-radius:5px;cursor:pointer;">📥 バックアップをダウンロード</button>
                     
@@ -1049,7 +1158,7 @@
             });
 
             document.getElementById('nsync-close-backup').addEventListener('click', () => overlay.remove());
-            document.getElementById('nsync-do-export').addEventListener('click', () => LocalDB.exportData());
+            document.getElementById('nsync-do-export').addEventListener('click', () => LocalDB.exportData().catch(error => showToast('バックアップ失敗: ' + error.message, 'error')));
             document.getElementById('nsync-do-preview').addEventListener('change', (e) => {
                 if (e.target.files.length > 0) {
                     previewBackup(e.target.files[0]);
@@ -1059,10 +1168,11 @@
             document.getElementById('nsync-do-clear').addEventListener('click', () => {
                 if (confirm('ブラウザが保持している全履歴とお気に入りを消去します。本当によろしいですか？（ダウンロード済みのバックアップファイルは消えません）')) {
                     LocalDB.clearAll().then(() => {
+                        failedSaves.clear(); updateSaveStatus();
                         showToast('すべての履歴を消去しました', 'ok');
                         if (activeTab !== 'backup_preview') loadList(1);
                         overlay.remove();
-                    });
+                    }).catch(error => showToast('削除失敗: ' + error.message, 'error'));
                 }
             });
         });
@@ -2660,77 +2770,6 @@
     // ============================================================
     // === Input 診断ツール ===
     // ============================================================
-    function inspectFileInputs() {
-        document.getElementById('nsync-diag-overlay')?.remove();
-
-        const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
-        const report = inputs.map((el, i) => {
-            const getParentInfo = (el, depth) => {
-                let p = el;
-                const chain = [];
-                for (let k = 0; k < depth; k++) {
-                    p = p?.parentElement;
-                    if (!p) break;
-                    chain.push(`${p.tagName.toLowerCase()}${p.id ? '#'+p.id : ''}${p.className ? '.'+p.className.trim().split(/\s+/).slice(0,2).join('.') : ''}`);
-                }
-                return chain.join(' > ');
-            };
-            return {
-                i,
-                accept: el.accept || '(none)',
-                multiple: el.multiple,
-                id: el.id || '(none)',
-                parents: getParentInfo(el, 4)
-            };
-        });
-
-        const ov = document.createElement('div');
-        ov.id = 'nsync-diag-overlay';
-        ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.82);z-index:200001;display:flex;align-items:center;justify-content:center;padding:20px;';
-
-        const box = document.createElement('div');
-        box.style.cssText = 'background:#111118;border:1px solid #7c3aed;border-radius:12px;padding:20px 24px;max-width:700px;width:100%;max-height:80vh;overflow-y:auto;font-family:Consolas,monospace;';
-
-        const title = document.createElement('div');
-        title.style.cssText = 'font-size:15px;font-weight:700;color:#e2e8f0;margin-bottom:12px;';
-        title.textContent = `🔍 file input 診断 (${inputs.length}件検出)`;
-        box.appendChild(title);
-
-        if (inputs.length === 0) {
-            const empty = document.createElement('div');
-            empty.style.cssText = 'color:#e55;font-size:13px;';
-            empty.textContent = '⚠ input[type="file"] が見つかりませんでした。ページが完全に読み込まれているか確認してください。';
-            box.appendChild(empty);
-        } else {
-            report.forEach(r => {
-                const item = document.createElement('div');
-                item.style.cssText = 'border:1px solid #2a2a3a;border-radius:6px;padding:10px 12px;margin-bottom:8px;font-size:12px;';
-                item.innerHTML = `
-                    <div style="color:#a78bfa;font-weight:700;margin-bottom:4px;">[${r.i}] accept: <span style="color:#fbbf24;">${esc(r.accept)}</span>&nbsp;&nbsp;multiple: ${r.multiple}&nbsp;&nbsp;id: ${esc(r.id)}</div>
-                    <div style="color:#94a3b8;word-break:break-all;">${esc(r.parents)}</div>
-                `;
-                box.appendChild(item);
-            });
-        }
-
-        // JSONをコピーできるテキストエリア
-        const pre = document.createElement('textarea');
-        pre.style.cssText = 'width:100%;margin-top:12px;background:#0c0c14;color:#7dd3fc;border:1px solid #2a2a3a;border-radius:4px;padding:8px;font-size:11px;height:100px;resize:vertical;';
-        pre.value = JSON.stringify(report, null, 2);
-        pre.readOnly = true;
-        box.appendChild(pre);
-
-        const closeBtn = document.createElement('button');
-        closeBtn.style.cssText = 'margin-top:12px;background:#2a2a45;border:1px solid #3a3a5a;color:#ccc;padding:7px 18px;border-radius:6px;cursor:pointer;font-size:13px;';
-        closeBtn.textContent = '閉じる';
-        closeBtn.addEventListener('click', () => ov.remove());
-        box.appendChild(closeBtn);
-
-        ov.appendChild(box);
-        ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
-        document.body.appendChild(ov);
-    }
-
     // ============================================================
     // === パネル開閉 ===
     // ============================================================
@@ -2739,7 +2778,7 @@
         const panel = document.getElementById('nsync-panel');
         if (panelOpen) {
             panel.classList.add('open');
-            if (historyData.length === 0) loadList(1);
+            loadList(1);
         } else {
             panel.classList.remove('open');
         }
@@ -2757,178 +2796,100 @@
             } catch(e) {}
         }
     }
-    function loadList(page) {
+    function loadList(page = 1) { viewedSessionId = null; LocalDB.beginView(); return loadPage(page); }
+    function loadFavorites() { return loadList(1); }
+    function loadSessionDetail(id) { viewedSessionId = id; LocalDB.beginView(); return loadPage(1); }
+    async function loadPage(page) {
+        if (page < 1) return;
         currentPage = page;
-        const listEl = document.getElementById('nsync-list-container');
-        if (!listEl) return;
-        listEl.innerHTML = '<div style="color:#555;font-size:12px;padding:20px 14px;">読み込み中...</div>';
-
-        if (window._isPreviewMode) {
-            if (activeTab === 'favorites') {
-                const arr = window._backupPreviewFavorites || [];
-                const limit = LIMIT;
-                const total = Math.ceil(arr.length / limit) || 1;
-                const start = (page - 1) * limit;
-                const slice = arr.slice(start, start + limit);
-                document.getElementById('nsync-prev').disabled = page <= 1;
-                document.getElementById('nsync-next').disabled = page >= total;
-                document.getElementById('nsync-page-info').textContent = `[Preview] ${page} / ${total}`;
-                
-                listEl.innerHTML = '';
-                slice.forEach(processThumbnailData);
-                renderFavoritesList(slice);
+        const requestId = ++listRequestId;
+        const list = document.getElementById('nsync-list-container');
+        if (!list) return;
+        list.textContent = '読み込み中...';
+        document.getElementById('nsync-prev').disabled = true;
+        document.getElementById('nsync-next').disabled = true;
+        try {
+            let result;
+            if (window._isPreviewMode) {
+                let rows;
+                if (activeTab === 'favorites') rows = window._backupPreviewFavorites;
+                else if (viewedSessionId) rows = window._backupPreviewHistory.filter(row => (row.session_id || 'unknown') === viewedSessionId);
+                else if (currentSearch) rows = window._backupPreviewHistory.filter(row => LocalDB.matches(row, currentSearch));
+                else rows = window._backupPreviewSessions;
+                result = { data: rows.slice((page - 1) * LIMIT, page * LIMIT).map(row => ({...row})), total_pages: Math.max(1, Math.ceil(rows.length / LIMIT)) };
+            } else if (activeTab === 'favorites') result = await LocalDB.getFavorites(page, LIMIT);
+            else if (viewedSessionId) result = await LocalDB.getSessionDetail(viewedSessionId, page, LIMIT);
+            else if (currentSearch) result = await LocalDB.searchHistory(currentSearch, page, LIMIT);
+            else result = await LocalDB.getSessions(page, LIMIT);
+            if (requestId !== listRequestId) return;
+            if (activeTab === 'favorites') { result.data.forEach(processThumbnailData); renderFavoritesList(result.data); }
+            else if (viewedSessionId) { result.data.forEach(processThumbnailData); renderSessionDetailGrid(result.data, viewedSessionId); }
+            else if (currentSearch) {
+                list.innerHTML = '';
+                for (const row of result.data) { processThumbnailData(row); list.appendChild(createListItem(row, false, !!row.fav_id, row.fav_id)); }
+                if (!result.data.length) list.textContent = '履歴がありません';
+            } else renderSessionFolders(result.data);
+            document.getElementById('nsync-prev').disabled = page <= 1;
+            document.getElementById('nsync-next').disabled = page >= result.total_pages;
+            document.getElementById('nsync-page-info').textContent = (window._isPreviewMode ? '[Preview] ' : '') + page + ' / ' + result.total_pages;
+        } catch (error) {
+            if (requestId === listRequestId) list.textContent = '履歴を読み込めませんでした。パネルを開き直してください';
+            console.error('[N-Local] Read failed:', error);
+        }
+    }
+    async function restoreHistory(item) {
+        try {
+            let row;
+            if (window._isPreviewMode) {
+                row = window._backupPreviewHistory.find(entry => entry.id === item.id) || item;
+                row = { ...row };
+                if (row._previewAsset) row.thumbnail = await LocalDB.restoreAsset(LocalDB.decodeAsset(row._previewAsset));
             } else {
-                const arr = window._backupPreviewSessions || [];
-                const limit = LIMIT;
-                const total = Math.ceil(arr.length / limit) || 1;
-                const start = (page - 1) * limit;
-                const slice = arr.slice(start, start + limit);
-                document.getElementById('nsync-prev').disabled = page <= 1;
-                document.getElementById('nsync-next').disabled = page >= total;
-                document.getElementById('nsync-page-info').textContent = `[Preview] ${page} / ${total}`;
-                
-                renderSessionFolders(slice);
+                row = await LocalDB.getHistoryItem(item.id);
+                if (!row && item.fav_id) row = await LocalDB.request('favorites', store => store.get(item.fav_id));
             }
-            return;
-        }
-
-        if (activeTab === 'favorites') {
-            loadFavorites();
-            return;
-        }
-
-        if (currentSearch) {
-            LocalDB.searchHistory(currentSearch, page, LIMIT).then(data => {
-                historyData = data.data;
-                currentPage = data.page;
-                const total = data.total_pages;
-
-                document.getElementById('nsync-prev').disabled = currentPage <= 1;
-                document.getElementById('nsync-next').disabled = currentPage >= total;
-                document.getElementById('nsync-page-info').textContent = `${currentPage} / ${total}`;
-
-                listEl.innerHTML = '';
-                if (historyData.length === 0) {
-                    listEl.innerHTML = '<div style="color:#555;font-size:12px;padding:20px 14px;">履歴がありません</div>';
-                } else {
-                    historyData.forEach((item, idx) => {
-                        processThumbnailData(item);
-                        listEl.appendChild(createListItem(item, false, false, null));
-                    });
-                }
-            });
-        } else {
-            LocalDB.getSessions(page, LIMIT).then(data => {
-                historyData = data.data;
-                currentPage = data.page;
-                const total = data.total_pages;
-
-                document.getElementById('nsync-prev').disabled = currentPage <= 1;
-                document.getElementById('nsync-next').disabled = currentPage >= total;
-                document.getElementById('nsync-page-info').textContent = `${currentPage} / ${total}`;
-
-                renderSessionFolders(historyData);
-            });
-        }
-
+            if (!row?.thumbnail) throw new Error('復元用画像がありません');
+            processThumbnailData(row);
+            cancelGeneration(); stopBatch();
+            await simulateDragAndDrop(row.thumbnail, row._metaB64);
+            if (panelOpen) togglePanel();
+        } catch (error) { showToast('復元データを読み込めませんでした', 'error'); console.error(error); }
     }
-
-    function previewBackup(file) {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            try {
-                const data = JSON.parse(e.target.result);
-                if (!data.history) throw new Error("無効なファイルです");
-                
-                const sessionsMap = new Map();
-                const sortedHistory = data.history.sort((a,b) => b.created_at.localeCompare(a.created_at));
-                sortedHistory.forEach(item => {
-                    const sid = item.session_id || 'unknown';
-                    if (!sessionsMap.has(sid)) {
-                        sessionsMap.set(sid, { session_id: sid, count: 0, latest_date: item.created_at, items: [] });
-                    }
-                    const s = sessionsMap.get(sid);
-                    s.count++;
-                    if (s.items.length < 4) s.items.push(item);
-                });
-                
-                const arr = Array.from(sessionsMap.values());
-                arr.forEach(s => {
-                    if (s.items.length > 0) s.prompt = s.items[0].prompt;
-                    s.thumbnails = s.items.map(i => i.thumbnail);
-                    s.last_updated = s.latest_date;
-                });
-                
-                window._isPreviewMode = true;
-                window._backupPreviewFavorites = data.favorites || [];
-                window._backupPreviewSessions = arr;
-                window._backupPreviewHistory = sortedHistory;
-                
-                activeTab = 'history';
-                currentPage = 1;
-                
-                currentSearch = '';
-                const searchInput = document.getElementById('nsync-search-input');
-                if (searchInput) searchInput.value = '';
-
-                document.querySelectorAll('.nsync-tab-btn').forEach(b => b.classList.remove('active'));
-                document.querySelectorAll('.nsync-tab-btn')[0].classList.add('active'); // Select history tab
-                
-                // Add Preview Exit UI
-                const titleEl = document.getElementById('nsync-header-title');
-                if (!document.getElementById('nsync-exit-preview')) {
-                    titleEl.innerHTML = 'N-Local <span style="color:#e55;font-size:11px;margin-left:4px;">[PREVIEW]</span> <button id="nsync-exit-preview" style="background:#e55;color:#fff;border:none;border-radius:3px;padding:2px 6px;font-size:10px;cursor:pointer;margin-left:6px;">終了</button>';
-                    document.getElementById('nsync-exit-preview').addEventListener('click', () => {
-                        window._isPreviewMode = false;
-                        window._backupPreviewSessions = null;
-                        window._backupPreviewHistory = null;
-                        window._backupPreviewFavorites = null;
-                        titleEl.textContent = 'N-Local';
-                        activeTab = 'history';
-                        document.querySelectorAll('.nsync-tab-btn').forEach(b => b.classList.remove('active'));
-                        document.querySelectorAll('.nsync-tab-btn')[0].classList.add('active');
-                        loadList(1);
-                    });
-                }
-
-                loadList(1);
-                showToast('プレビューモードに入りました（上書きされません）', 'ok');
-            } catch (err) {
-                showToast('プレビューに失敗: ' + err.message, 'error');
+    async function previewBackup(file) {
+        try {
+            const data = await LocalDB.readBackup(file);
+            const assets = new Map((data.assets || []).map(asset => [asset.id, asset]));
+            const history = data.history.map(row => ({ ...row, thumbnail: row.thumbnail || assets.get(row.id)?.image,
+                _previewAsset: assets.get(row.id) })).sort((a,b) => b.created_at.localeCompare(a.created_at));
+            const byId = new Map(history.map(row => [row.id, row]));
+            const favorites = data.favorites.map(f => ({ ...(byId.get(f.history_id) || f), fav_id: f.fav_id, history_id: f.history_id }));
+            const favoriteIds = new Map(favorites.map(f => [f.history_id, f.fav_id]));
+            const sessions = new Map();
+            for (const row of history) {
+                row.fav_id = favoriteIds.get(row.id) || null;
+                const sid = row.session_id || 'unknown';
+                if (!sessions.has(sid)) sessions.set(sid, { session_id: sid, count: 0, last_updated: row.created_at, thumbnails: [] });
+                const session = sessions.get(sid); session.count++;
+                if (session.thumbnails.length < 4) session.thumbnails.push(row.thumbnail);
             }
-        };
-        reader.readAsText(file);
-    }
-
-    function loadFavorites() {
-        LocalDB.getFavorites(currentPage, LIMIT).then(data => {
-            const rows = data.data;
-            rows.forEach(processThumbnailData);
-            renderFavoritesList(rows);
-        }).catch(e => {
-            document.getElementById('nsync-list-container').innerHTML = '<div style="color:#e55;font-size:12px;padding:20px 14px;">❌ 接続エラー</div>';
-        });
-    }
-
-    function loadSessionDetail(sessionId) {
-        const listEl = document.getElementById('nsync-list-container');
-        listEl.innerHTML = '<div style="color:#555;font-size:12px;padding:20px 14px;">画像を読み込み中...</div>';
-        
-        if (window._isPreviewMode) {
-            const data = window._backupPreviewHistory.filter(h => h.session_id === sessionId);
-            // 生成順（新しい順）に並び替え
-            data.sort((a,b) => b.created_at.localeCompare(a.created_at));
-            data.forEach(processThumbnailData);
-            renderSessionDetailGrid(data, sessionId);
-            return;
-        }
-
-        LocalDB.getSessionDetail(sessionId).then(data => {
-            data.forEach(processThumbnailData);
-            renderSessionDetailGrid(data, sessionId);
-        }).catch(e => {
-            listEl.innerHTML = '<div style="color:#e55;font-size:12px;padding:20px 14px;">❌ 取得に失敗しました</div>';
-        });
+            window._backupPreviewHistory = history;
+            window._backupPreviewFavorites = favorites;
+            window._backupPreviewSessions = [...sessions.values()];
+            window._isPreviewMode = true;
+            activeTab = 'history'; currentSearch = '';
+            document.getElementById('nsync-search-input').value = '';
+            document.querySelectorAll('.nsync-tab-btn').forEach((b,i) => b.classList.toggle('active', i === 0));
+            const title = document.getElementById('nsync-header-title');
+            title.textContent = 'N-Local [PREVIEW] ';
+            const exit = document.createElement('button'); exit.textContent = '終了'; exit.id = 'nsync-exit-preview';
+            exit.onclick = () => {
+                window._isPreviewMode = false;
+                window._backupPreviewHistory = window._backupPreviewFavorites = window._backupPreviewSessions = null;
+                title.textContent = 'N-Local'; loadList(1);
+            };
+            title.appendChild(exit); loadList(1);
+            showToast('バックアップをプレビューしています（上書きしません）', 'ok');
+        } catch (error) { showToast('プレビューに失敗: ' + error.message, 'error'); }
     }
 
     // ============================================================
@@ -2992,61 +2953,32 @@
     function renderSessionDetailGrid(images, sessionId) {
         const listEl = document.getElementById('nsync-list-container');
         listEl.innerHTML = '';
-
         const header = document.createElement('div');
         header.className = 'nsync-detail-grid-header';
-        header.innerHTML = `
-            <button class="nsync-back-btn">◀ 戻る</button>
-            <span style="font-size:12px;color:#ccc;font-weight:bold;">${images.length}枚の生成画像</span>
-        `;
-        header.querySelector('.nsync-back-btn').addEventListener('click', () => loadList(1));
+        const back = document.createElement('button');
+        back.textContent = '◀ 戻る';
+        back.onclick = () => loadList(1);
+        header.append(back, document.createTextNode(' このページ: ' + images.length + '枚'));
         listEl.appendChild(header);
-
         const grid = document.createElement('div');
         grid.className = 'nsync-detail-grid';
-
-        images.forEach(img => {
-            const item = document.createElement('div');
-            item.className = 'nsync-detail-item';
-            item.innerHTML = `
-                <img src="${img.thumbnail || ''}" loading="lazy">
-                <button class="nsync-detail-fav" data-id="${img.id}">☆</button>
-            `;
-            
-            // 画像クリックで直接復元し、パネルを閉じる
-            item.addEventListener('click', () => {
-                if (img.thumbnail && img._metaB64) {
-                    simulateDragAndDrop(img.thumbnail, img._metaB64);
-                    showToast('画像を反映しました');
-                    togglePanel(); // パネルを閉じる
-                } else {
-                    showToast('❌ 画像メタデータがありません', 'error');
-                }
-            });
-
-            // お気に入りボタン
-            const favBtn = item.querySelector('.nsync-detail-fav');
-            if (window._isPreviewMode) {
-                const favMatch = (window._backupPreviewFavorites || []).find(f => f.history_id === img.id);
-                if (favMatch) {
-                    favBtn.classList.add('on');
-                    favBtn.textContent = '★';
-                }
-                favBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    showToast('プレビュー中は変更できません', 'error');
-                });
-            } else {
-                favBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    toggleFavorite(favBtn, img.id);
-                });
-                loadFavIdThenRemove(favBtn, img.id, true);
-            }
-
-            grid.appendChild(item);
+        images.forEach(item => {
+            const el = document.createElement('div');
+            el.className = 'nsync-detail-item';
+            el.dataset.id = item.id;
+            const image = document.createElement('img');
+            image.alt = '保存画像';
+            image.src = item.thumbnail || '';
+            image.loading = 'lazy';
+            image.onclick = () => restoreHistory(item);
+            const star = document.createElement('button');
+            star.className = 'nsync-detail-fav' + (item.fav_id ? ' on' : '');
+            star.dataset.favId = item.fav_id || '';
+            star.textContent = item.fav_id ? '★' : '☆';
+            star.onclick = e => { e.stopPropagation(); toggleFavorite(star, item.id); };
+            el.append(image, star);
+            grid.appendChild(el);
         });
-
         listEl.appendChild(grid);
     }
 
@@ -3075,81 +3007,28 @@
     // === リストアイテム生成（共通）===
     // ============================================================
     function createListItem(item, isNew, isFavorite, favId) {
-        // SQLiteの "YYYY-MM-DD HH:MM:SS" または APIの "....000Z" 形式を跨いで処理
-        const dtStrVal = item.created_at || '';
-        const norm = dtStrVal.replace(' ', 'T');
-        const dt = dtStrVal ? new Date(norm.endsWith('Z') ? norm : norm + 'Z') : new Date();
-        const dateStr = `${dt.getFullYear()}/${pad(dt.getMonth()+1)}/${pad(dt.getDate())}`;
-        const timeStr = `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
-
         const el = document.createElement('div');
-        el.className = 'nsync-item' + (isNew ? ' nsync-item-new' : '');
+        el.className = 'nsync-item';
         el.dataset.id = item.id;
-
-        el.innerHTML = `
-            <div class="nsync-item-datetime">
-                <span class="nsync-item-date">${dateStr}</span>
-                <span class="nsync-item-time">${timeStr}</span>
-            </div>
-            ${item.thumbnail
-                ? `<img src="${item.thumbnail}" class="nsync-thumbnail" title="クリックで復元">`
-                : `<div style="width:48px;height:48px;border-radius:4px;border:1px dashed #2d2040;flex-shrink:0;"></div>`
-            }
-            <div class="nsync-item-spacer"></div>
-            <button class="nsync-fav-star${isFavorite ? ' on' : ''}" data-history-id="${item.id}" data-fav-id="${favId || ''}" title="お気に入り">${isFavorite ? '★' : '☆'}</button>
-        `;
-        
-        const thumb = el.querySelector('.nsync-thumbnail');
-        if (thumb) {
-            thumb.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (item.thumbnail && item._metaB64) {
-                    simulateDragAndDrop(item.thumbnail, item._metaB64);
-                    showToast('画像を反映しました');
-                    togglePanel(); // パネルを閉じる
-                } else {
-                    showToast('❌ 画像メタデータがありません', 'error');
-                }
-            });
-        }
-
-        // タイムスタンプエリアクリック→直接復元
-        el.querySelector('.nsync-item-datetime').addEventListener('click', () => {
-            if (item.thumbnail && item._metaB64) {
-                simulateDragAndDrop(item.thumbnail, item._metaB64);
-                showToast('画像を反映しました');
-                togglePanel();
-            }
-        });
-
-        // サムネがない場合のスペーサークリック→直接復元
-        const spacer = el.querySelector('.nsync-item-spacer');
-        if (spacer) spacer.addEventListener('click', () => {
-            if (item.thumbnail && item._metaB64) {
-                simulateDragAndDrop(item.thumbnail, item._metaB64);
-                showToast('画像を反映しました');
-                togglePanel();
-            }
-        });
-
-        const starBtn = el.querySelector('.nsync-fav-star');
-        if (window._isPreviewMode) {
-            const favMatch = (window._backupPreviewFavorites || []).find(f => f.history_id === item.id);
-            if (favMatch && !isFavorite) {
-                starBtn.classList.add('on');
-                starBtn.textContent = '★';
-            }
-            starBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                showToast('プレビュー中は変更できません', 'error');
-            });
-        } else {
-            starBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                toggleFavorite(starBtn, item.id);
-            });
-        }
-
+        const date = document.createElement('div');
+        date.className = 'nsync-item-datetime';
+        const normalized = String(item.created_at || '').replace(' ', 'T');
+        const timestamp = new Date(normalized.endsWith('Z') ? normalized : normalized + 'Z');
+        date.textContent = `${timestamp.getFullYear()}/${pad(timestamp.getMonth() + 1)}/${pad(timestamp.getDate())} ${pad(timestamp.getHours())}:${pad(timestamp.getMinutes())}:${pad(timestamp.getSeconds())}`;
+        const image = document.createElement('img');
+        image.alt = '保存画像';
+        image.className = 'nsync-thumbnail';
+        image.src = item.thumbnail || '';
+        image.loading = 'lazy';
+        const spacer = document.createElement('div');
+        spacer.className = 'nsync-item-spacer';
+        const star = document.createElement('button');
+        star.className = 'nsync-fav-star' + (favId ? ' on' : '');
+        star.dataset.favId = favId || '';
+        star.textContent = favId ? '★' : '☆';
+        star.onclick = e => { e.stopPropagation(); toggleFavorite(star, item.id); };
+        el.onclick = () => restoreHistory(item);
+        el.append(date, image, spacer, star);
         return el;
     }
 
@@ -3157,6 +3036,7 @@
     // === お気に入りトグル ===
     // ============================================================
     function toggleFavorite(starBtn, historyId) {
+        if (window._isPreviewMode) { showToast('プレビュー中は変更できません', 'error'); return; }
         const isOn = starBtn.classList.contains('on');
         if (isOn) {
             const favId = starBtn.dataset.favId;
@@ -3361,23 +3241,16 @@
                 const metaChunks = [];
                 let offset = 0;
                 const dv = new DataView(metaUint8.buffer, metaUint8.byteOffset, metaUint8.byteLength);
-                let importedJson = null;
                 while (offset < metaUint8.length) {
+                    if (offset + 12 > metaUint8.length) throw new Error("Invalid metadata");
                     const len = dv.getUint32(offset);
+                    if (offset + 12 + len > metaUint8.length) throw new Error("Invalid metadata length");
                     const typeStr = String.fromCharCode(metaUint8[offset+4], metaUint8[offset+5], metaUint8[offset+6], metaUint8[offset+7]);
                     const data = metaUint8.slice(offset+8, offset+8+len);
-                    if (typeStr === 'tEXt') {
-                        const dec = new TextDecoder().decode(data);
-                        if (dec.startsWith('Comment\0')) importedJson = dec.substring(8);
-                    }
                     metaChunks.push({ full: metaUint8.slice(offset, offset + 12 + len) });
                     offset += 12 + len;
                 }
                 
-                if (importedJson) {
-                    window._nsyncSeenJSONs = window._nsyncSeenJSONs || new Set();
-                    window._nsyncSeenJSONs.add(importedJson);
-                }
                 
                 const finalUint8 = injectPngChunks(basePngUint8, metaChunks);
                 finalBlob = new Blob([finalUint8], { type: 'image/png' });
@@ -3506,20 +3379,33 @@
                 obj._nsyncObjectUrls.push(url);
                 window._nsyncBlobUrlMap = window._nsyncBlobUrlMap || new Map();
                 window._nsyncBlobUrlMap.set(url, obj);
-                if (!obj._nsyncProcessed) {
-                    obj._nsyncProcessed = true;
-                    setTimeout(() => processGeneratedImage(obj), 50);
+                let retained = 0;
+                const entries = [...window._nsyncBlobUrlMap.entries()];
+                for (let i = entries.length - 1; i >= 0; i--) {
+                    retained += entries[i][1].size;
+                    if (retained > 16 * 1024 * 1024 || entries.length - i > 100) window._nsyncBlobUrlMap.delete(entries[i][0]);
+                }
+                if (obj._nsyncObjectUrls.length > 8) obj._nsyncObjectUrls.shift();
+                const context = window._nsyncIsRestoring ? null : generation;
+                if (context && obj._nsyncProcessed !== context.id) {
+                    obj._nsyncProcessed = context.id;
+                    if (context) {
+                        context.processing++;
+                        setTimeout(() => processGeneratedImage(obj, context), 0);
+                    }
                 }
             }
             return url;
         };
 
-        document.addEventListener('pointerdown', (e) => {
-            if (e.isTrusted && isGenerateButton(e.target)) {
-                _nsyncPendingGenerations++;
-                console.log(`[N-Local] Generate tapped (pending: ${_nsyncPendingGenerations})`);
-            }
+        document.addEventListener('click', (e) => {
+            if (e.isTrusted && isGenerateButton(e.target)) beginGeneration();
         }, true);
+        // Native button keyboard activation also dispatches click.
+        document.addEventListener('change', (e) => {
+            if (e.target.matches?.('input[type="file"]')) cancelGeneration();
+        }, true);
+        document.addEventListener('drop', () => cancelGeneration(), true);
 
         console.log('[N-Local] URL.createObjectURL patched ✓');
     }
@@ -3742,192 +3628,145 @@
             hash: blob._nsyncHash || '',
             hashPromise
         });
-    }
-
-    function completeGeneratedWithoutHistory(reason) {
-        if (_nsyncPendingGenerations <= 0) return;
-        _nsyncPendingGenerations--;
-        console.log(`[N-Local] Generated image kept in session grid only (${reason})`);
-        if (batchOnGenerated) batchOnGenerated();
-    }
-
-    function processGeneratedImage(blob) {
-        // 非同期処理の前に生成順タイムスタンプを確保
-        const capturedAt = new Date().toISOString();
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            const uint8 = new Uint8Array(e.target.result);
-            const chunks = parsePngChunks(uint8);
-            if (!chunks) {
-                if (_nsyncPendingGenerations > 0 && blob.type && blob.type.startsWith('image/')) {
-                    rememberSessionBlob(blob);
-                    completeGeneratedWithoutHistory(`non-png ${blob.type}`);
-                }
-                return;
-            }
-
-            const metaChunks = chunks.filter(c => c.type === 'tEXt' || c.type === 'iTXt');
-            if (metaChunks.length === 0) {
-                if (_nsyncPendingGenerations > 0) {
-                    rememberSessionBlob(blob);
-                    completeGeneratedWithoutHistory('no metadata chunks');
-                }
-                return;
-            }
-
-            let isNovelAIGen = false;
-            let jsonString = null;
-            for (const c of metaChunks) {
-                if (c.type === 'tEXt') {
-                    const dec = new TextDecoder().decode(c.data);
-                    // NAIのパラメーターは "Comment" チャンクに格納される
-                    if (dec.startsWith('Comment\0')) {
-                        isNovelAIGen = true;
-                        jsonString = dec.substring(8);
-                        break;
-                    }
-                }
-            }
-
-            if (!isNovelAIGen || !jsonString) {
-                if (_nsyncPendingGenerations > 0) {
-                    rememberSessionBlob(blob);
-                    completeGeneratedWithoutHistory('no NovelAI comment metadata');
-                }
-                return;
-            }
-
-            // 生成パラメータ（JSON）を記憶し、UI再描画などで同じ画像が複数回処理されるのを防ぐ
-            window._nsyncSeenJSONs = window._nsyncSeenJSONs || new Set();
-            if (window._nsyncSeenJSONs.size > 500) window._nsyncSeenJSONs.clear(); // メモリリーク防止
-            if (window._nsyncSeenJSONs.has(jsonString)) {
-                return; // すでに処理された画像なのでスキップ
-            }
-            window._nsyncSeenJSONs.add(jsonString);
-
-            // セッション画像グリッド表示用にBlobを記憶（ページリロードでリセットされる）
-            rememberSessionBlob(blob);
-
-            try {
-                let apiData = {};
-                try { apiData = JSON.parse(jsonString); } catch(err){}
-                const prompt = apiData.prompt || '';
-                const uc = apiData.uc || apiData.negative_prompt || '';
-
-                // APIデータから各種パラメータを抽出
-                const model = typeof apiData.model === 'string' ? apiData.model : null;
-                const parameters = apiData.parameters || apiData || {};
-                const scale = parameters.scale || parameters.guidance_scale || null;
-                const steps = parameters.steps || null;
-                const seed = parameters.seed || null;
-                const sampler = parameters.sampler || null;
-                const width = parameters.width || null;
-                const height = parameters.height || null;
-
-                // キャラクタープロンプト（V3およびV4対応）
-                let charPromptsJson = null;
-                try {
-                    let cpArray = [];
-                    // V3 の形式
-                    if (parameters.characterPrompts) {
-                        const parsedCP = Array.isArray(parameters.characterPrompts) 
-                            ? parameters.characterPrompts 
-                            : JSON.parse(parameters.characterPrompts);
-                        cpArray = cpArray.concat(parsedCP.map(c => ({
-                            char_caption: c.prompt || c.char_caption || '',
-                            char_negative: c.uc || c.char_negative || ''
-                        })));
-                    }
-                    // V4 の形式
-                    const v4p = parameters.v4_prompt;
-                    const v4n = parameters.v4_negative_prompt;
-                    if (v4p && v4p.caption && Array.isArray(v4p.caption.char_captions)) {
-                        const charCaps = v4p.caption.char_captions;
-                        const charNegCaps = (v4n && v4n.caption && Array.isArray(v4n.caption.char_captions))
-                            ? v4n.caption.char_captions : [];
-                            
-                        cpArray = cpArray.concat(charCaps.map((c, idx) => {
-                            const negC = charNegCaps[idx] || {};
-                            // すべてのプロパティ（centers座標など）を含めることで変更を完全検知
-                            return Object.assign({}, c, {
-                                char_caption: c.char_caption !== undefined ? c.char_caption : (c.prompt || ''),
-                                char_negative: negC.char_caption !== undefined ? negC.char_caption : (negC.uc || '')
-                            });
-                        }));
-                    }
-                    if (cpArray.length > 0) {
-                        charPromptsJson = JSON.stringify(cpArray);
-                    }
-                } catch(e) {
-                    console.error('[N-Local] Character prompt extraction error:', e);
-                }
-
-                const fullData = {
-                    prompt, 
-                    negative_prompt: uc,
-                    model, scale, steps, seed, sampler, width, height,
-                    char_prompts_json: charPromptsJson,
-                    session_id: CURRENT_SESSION_ID,
-                    created_at: capturedAt
-                };
-
-                // Canvasで サムネイル（最短100px）化
-                const maxEdge = 100;
-                const img = new Image();
-                img.onload = () => {
-                    let w = img.width, h = img.height;
-                    if (w > maxEdge || h > maxEdge) {
-                        if (w > h) { h = Math.round(h * maxEdge / w); w = maxEdge; }
-                        else { w = Math.round(w * maxEdge / h); h = maxEdge; }
-                    }
-                    const cvs = document.createElement('canvas');
-                    cvs.width = w; cvs.height = h;
-                    const ctx = cvs.getContext('2d');
-                    ctx.drawImage(img, 0, 0, w, h);
-                    
-                    // WebP (品質0.6) で超高圧縮化
-                    const webpData = cvs.toDataURL('image/webp', 0.6);
-                    
-                    // メタデータチャンクから巨大フィールド（Vibe画像等）を除外して軽量化
-                    const strippedMeta = stripLargeMetaFields(metaChunks);
-                    const totalLen = strippedMeta.reduce((acc, c) => acc + c.full.length, 0);
-                    const combinedMeta = new Uint8Array(totalLen);
-                    let off = 0;
-                    strippedMeta.forEach(c => { combinedMeta.set(c.full, off); off += c.full.length; });
-                    const metaB64 = uint8ToBase64(combinedMeta);
-                    
-                    fullData.thumbnail = JSON.stringify({ image: webpData, meta: metaB64 });
-                    sendToHub(fullData);
-                };
-                img.src = _origCreateObjectURL.call(URL, blob); // フック再突入を回避
-
-            } catch(e) { console.error('[N-Local] Thumbnail processing error:', e); }
-        };
-        reader.readAsArrayBuffer(blob);
-    }
-
-    function sendToHub(data) {
-        // Generateボタンが押されていない場合（手動インポート）は履歴に保存しない
-        if (_nsyncPendingGenerations <= 0) {
-            console.log('[N-Local] Skipping history save (no pending generation – likely an import)');
-            return;
+        let bytes = window._nsyncSessionBlobs.reduce((sum, item) => sum + item.size, 0);
+        while (window._nsyncSessionBlobs.length > 100 || bytes > 48 * 1024 * 1024) {
+            const oldest = window._nsyncSessionBlobs.shift();
+            window._nsyncSessionItems.shift();
+            bytes -= oldest.size;
         }
-        _nsyncPendingGenerations--;
-
-        if (!data.prompt) return;
-        data.session_id = CURRENT_SESSION_ID;
-        LocalDB.addHistory(data)
-            .then(id => {
-                data.id = id;
-                prependToList(data);
-                if (batchOnGenerated) batchOnGenerated();
-            })
-            .catch(err => {
-                console.error('[N-Local] Local DB save error:', err);
-                showToast('❌ ローカル保存に失敗しました', 'error');
-                if (batchOnGenerated) batchOnGenerated();
-            });
     }
+
+    function cancelGeneration() {
+        clearTimeout(generationTimer);
+        clearTimeout(generationSettleTimer);
+        if (generation) generation.cancelled = true;
+        generation = null;
+    }
+    function beginGeneration() {
+        cancelGeneration();
+        generation = { id: crypto.randomUUID(), hashes: new Set(), processing: 0, saved: 0, cancelled: false };
+        const context = generation;
+        generationTimer = setTimeout(() => {
+            if (generation !== context) return;
+            cancelGeneration();
+            stopBatch();
+            showToast('生成結果を確認できませんでした。連続生成を停止しました', 'error');
+        }, 180000);
+        navigator.storage?.persist?.().catch(() => {});
+    }
+    function settleGeneration(context) {
+        if (generation !== context || context.cancelled || !context.saved || context.processing) return;
+        clearTimeout(generationSettleTimer);
+        generationSettleTimer = setTimeout(() => {
+            if (generation !== context || context.processing) return;
+            if (!findGenerateButton()) { settleGeneration(context); return; }
+            cancelGeneration();
+            if (batchOnGenerated) batchOnGenerated();
+        }, 2500);
+    }
+    async function makeThumbnail(blob) {
+        const url = _origCreateObjectURL.call(URL, blob);
+        try {
+            return await new Promise((resolve, reject) => {
+                const img = new Image();
+                const timer = setTimeout(() => reject(new Error('画像読み込みタイムアウト')), 15000);
+                img.onerror = () => { clearTimeout(timer); reject(new Error('画像読み込み失敗')); };
+                img.onload = () => {
+                    clearTimeout(timer);
+                    try {
+                        const ratio = Math.min(1, 100 / Math.max(img.width, img.height));
+                        const canvas = document.createElement('canvas');
+                        canvas.width = Math.max(1, Math.round(img.width * ratio));
+                        canvas.height = Math.max(1, Math.round(img.height * ratio));
+                        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+                        resolve(canvas.toDataURL('image/webp', 0.6));
+                    } catch (error) { reject(error); }
+                };
+                img.src = url;
+            });
+        } finally { URL.revokeObjectURL(url); }
+    }
+    async function processGeneratedImage(blob, context) {
+        const capturedAt = new Date().toISOString();
+        try {
+            if (context.cancelled) return;
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            const chunks = parsePngChunks(bytes);
+            const meta = (chunks || []).filter(c => c.type === 'tEXt' || c.type === 'iTXt');
+            const comment = meta.find(c => c.type === 'tEXt' && new TextDecoder().decode(c.data).startsWith('Comment\0'));
+            // Unrelated preview/reference blobs must not consume a generation slot.
+            if (!comment) return;
+            const apiData = JSON.parse(new TextDecoder().decode(comment.data).substring(8));
+            const hash = await hashArrayBuffer(bytes.buffer);
+            if (context.cancelled || context.hashes.has(hash)) return;
+            context.hashes.add(hash);
+            rememberSessionBlob(blob);
+            const p = apiData.parameters || apiData;
+            const chars = p.v4_prompt?.caption?.char_captions || [];
+            const negatives = p.v4_negative_prompt?.caption?.char_captions || [];
+            const cp = chars.length ? chars.map((c, i) => ({ ...c, char_negative: negatives[i]?.char_caption || '' })) :
+                (typeof p.characterPrompts === 'string' ? JSON.parse(p.characterPrompts) : p.characterPrompts || []);
+            const stripped = stripLargeMetaFields(meta);
+            const combined = new Uint8Array(stripped.reduce((n, c) => n + c.full.length, 0));
+            let offset = 0;
+            for (const chunk of stripped) { combined.set(chunk.full, offset); offset += chunk.full.length; }
+            const image = await makeThumbnail(blob);
+            const data = {
+                event_id: context.id + ':' + hash,
+                prompt: p.v4_prompt?.caption?.base_caption ?? p.prompt ?? apiData.prompt ?? '',
+                negative_prompt: p.v4_negative_prompt?.caption?.base_caption ?? p.uc ?? p.negative_prompt ?? '',
+                model: typeof apiData.model === 'string' ? apiData.model : null,
+                scale: p.scale ?? p.guidance_scale ?? null, steps: p.steps ?? null, seed: p.seed ?? null,
+                sampler: p.sampler ?? null, width: p.width ?? null, height: p.height ?? null,
+                char_prompts_json: cp.length ? JSON.stringify(cp) : null,
+                session_id: CURRENT_SESSION_ID, captured_at: capturedAt,
+                thumbnail: JSON.stringify({ image, meta: uint8ToBase64(combined) })
+            };
+            if (await sendToHub(data)) context.saved++;
+        } catch (error) {
+            stopBatch();
+            console.error('[N-Local] Capture failed:', error);
+            showToast('履歴の処理に失敗しました。元画像をダウンロードしてください', 'error');
+        } finally {
+            context.processing--;
+            settleGeneration(context);
+        }
+    }
+
+    const failedSaves = new Map();
+    let retrySaveTimer = null;
+    let retryingSaves = false;
+    async function sendToHub(data) {
+        data.id = data.event_id;
+        failedSaves.set(data.id, data);
+        try {
+            await LocalDB.addHistory(data);
+            failedSaves.delete(data.id);
+            prependToList(data);
+            updateSaveStatus();
+            return true;
+        } catch (error) {
+            stopBatch();
+            showToast('端末への保存に失敗しました。ページを閉じず空き容量を確認してください', 'error');
+            console.error('[N-Local] Save failed:', error);
+            updateSaveStatus();
+            clearTimeout(retrySaveTimer);
+            retrySaveTimer = setTimeout(retryFailedSaves, 10000);
+            return false;
+        }
+    }
+    function updateSaveStatus() {
+        const badge = document.getElementById('nsync-status');
+        if (badge) { badge.textContent = failedSaves.size ? '未保存 ' + failedSaves.size + '件（タップで再試行）' : '● ローカル保存'; badge.onclick = retryFailedSaves; }
+    }
+    async function retryFailedSaves() {
+        if (retryingSaves) return;
+        retryingSaves = true;
+        try { for (const data of [...failedSaves.values()]) { if (!await sendToHub(data)) break; } }
+        finally { retryingSaves = false; }
+    }
+    window.addEventListener('beforeunload', event => { if (failedSaves.size) { event.preventDefault(); event.returnValue = ''; } });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && failedSaves.size) retryFailedSaves(); });
 
     // ============================================================
     // === バッチ（連続）生成 ===
@@ -3983,7 +3822,7 @@
 
     async function startBatch() {
         const input = document.getElementById('nsync-batch-input');
-        const target = parseInt(input.value);
+        const target = parseInt(input?.value || '10', 10);
         if (!target || target < 1) {
             showToast('⚠ 生成回数を1以上で指定してください', 'error');
             return;
@@ -4006,7 +3845,7 @@
         const btn = document.getElementById('nsync-batch-btn');
         btn.className = 'stop';
         btn.textContent = '■ 停止';
-        input.disabled = true;
+        if (input) input.disabled = true;
         updateBatchProgress();
 
         showToast(`🔄 連続生成を開始 (${target}回)`);
@@ -4023,11 +3862,12 @@
         const btn = document.getElementById('nsync-batch-btn');
         const input = document.getElementById('nsync-batch-input');
         const progress = document.getElementById('nsync-batch-progress');
-        btn.className = 'start';
-        btn.textContent = '▶ 開始';
-        input.disabled = false;
-        progress.classList.remove('active');
-        progress.textContent = batchCount > 0 ? `${batchCount}回完了` : '';
+        if (btn) { btn.className = 'start'; btn.textContent = '▶ 開始'; }
+        if (input) input.disabled = false;
+        if (progress) {
+            progress.classList.remove('active');
+            progress.textContent = batchCount > 0 ? `${batchCount}回完了` : '';
+        }
 
         if (batchCount > 0) {
             showToast(`✅ 連続生成を停止しました (${batchCount}/${batchTarget}回完了)`);
@@ -4083,7 +3923,7 @@
         };
 
         // ボタンをクリック（プログラム的なclickはpointerdownを発火しないため、手動でカウント）
-        _nsyncPendingGenerations++;
+        beginGeneration();
         pressGenerateButton(genBtn);
     }
 
@@ -4091,71 +3931,12 @@
     // ============================================================
     // === リストの先頭にエントリを追加（再読込み不要）===
     // ============================================================
+    let historyRefreshTimer = null;
     function prependToList(item) {
-        if (!item || !item.id) return;
-        if (activeTab !== 'history') return;
-        const listEl = document.getElementById('nsync-list-container');
-        if (!listEl) return;
-        
-        processThumbnailData(item);
-
-        // グリッドコンテナがなければ作成（初回の生成時）
-        let grid = listEl.querySelector('.nsync-detail-grid');
-        if (!grid) {
-            listEl.innerHTML = '';
-            grid = document.createElement('div');
-            grid.className = 'nsync-detail-grid';
-            listEl.appendChild(grid);
-        }
-
-        // 同じIDが既に存在する場合は削除（重複防止）
-        const existing = grid.querySelector(`[data-id="${item.id}"]`);
-        if (existing) existing.remove();
-
-        // 最新エントリの時刻がない場合は付与
-        if (!item.created_at) {
-            const now = new Date();
-            item.created_at = `${now.getUTCFullYear()}-${pad(now.getUTCMonth()+1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())}`;
-        }
-
-        // グリッドアイテムを作成
-        const el = document.createElement('div');
-        el.className = 'nsync-detail-item';
-        el.dataset.id = item.id;
-        el.innerHTML = `
-            <img src="${item.thumbnail || ''}" loading="lazy">
-            <button class="nsync-detail-fav" data-id="${item.id}">☆</button>
-        `;
-
-        // 画像タップで復元
-        el.addEventListener('click', () => {
-            if (item.thumbnail && item._metaB64) {
-                simulateDragAndDrop(item.thumbnail, item._metaB64);
-                showToast('画像を反映しました');
-                togglePanel();
-            } else {
-                showToast('❌ 画像メタデータがありません', 'error');
-            }
-        });
-
-        // お気に入りボタン
-        const favBtn = el.querySelector('.nsync-detail-fav');
-        favBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            toggleFavorite(favBtn, item.id);
-        });
-
-        // グリッドの先頭に挿入
-        grid.insertBefore(el, grid.firstChild);
-
-        // 点滅アニメーション
-        el.style.opacity = '0';
-        el.style.transform = 'scale(0.9)';
-        el.style.transition = 'opacity 0.35s, transform 0.35s';
-        requestAnimationFrame(() => {
-            el.style.opacity = '1';
-            el.style.transform = 'scale(1)';
-        });
+        if (!item?.id || !panelOpen || activeTab !== 'history' || window._isPreviewMode || currentPage !== 1) return;
+        if (viewedSessionId && viewedSessionId !== item.session_id) return;
+        clearTimeout(historyRefreshTimer);
+        historyRefreshTimer = setTimeout(() => { LocalDB.beginView(); loadPage(1); }, 300);
     }
 
     // ============================================================
@@ -4246,9 +4027,11 @@
                 await LocalDB.init();
                 buildUI();
                 patchObjectURL();
+                updateSaveStatus();
+                LocalDB.migrateLegacy().then(count => { if (count) showToast(count + "件の履歴を軽量化しました", "ok"); }).catch(error => showToast("軽量化を中断しました（元データは保持）: " + error.message, "error"));
                 initJpegDownloadPopup();
                 done = true;
-                console.log('[N-Local] v1.1.77 Ready');
+                console.log('[N-Local] v1.2.0 Ready');
                 return true;
             } catch (error) {
                 console.error('[N-Local] Initialization failed; retrying:', error);

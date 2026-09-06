@@ -96,6 +96,12 @@ On mobile, D-pad placement is delayed and refreshed while the keyboard appears, 
 
 ## Data Management
 
+Version 1.2.0 stores thumbnails as binary Blobs and metadata with lossless gzip compression when supported. Existing history is migrated automatically in small, verified transactions; interrupted migration resumes on the next load. Favorites reference history instead of duplicating its image and metadata. Lists are paginated and older sessions remain accessible beyond 2,000 records.
+
+Save retries use stable event IDs to avoid duplicates. Storage failures stop batch generation and display pending saves; keep the tab open until retries succeed. Pending data cannot survive closing the tab when browser storage itself has failed. Current-session original-image previews are limited to 100 images / 48 MiB.
+
+Backups use JSON format v2 and preserve compressed assets. Legacy backups remain readable. Preview does not overwrite the database. History stores restoration thumbnails and metadata, not full-resolution original images or reference materials. This standalone edition does not automatically synchronize devices; export and preview backups to transfer history.
+
 The data management panel can:
 
 - Download a backup
@@ -112,11 +118,15 @@ Browser site-data deletion can remove IndexedDB history. Create a backup before 
 - After editing the userscript, run:
 
 ```powershell
-node --check NovelAI_Local.user.js
+npm ci
+npm run build
+npm test
 ```
 
 - Bump `@version` in `NovelAI_Local.user.js` whenever Tampermonkey should detect an update.
 - Push changes to GitHub because this standalone version updates through GitHub.
+
+The storage source is `src/history-storage.js`; `npm run build` embeds it into the userscript. Tests cover migration, compression fallback, atomic imports, pagination, deduplication, and failed-save retries. `npm run test:browser` serves an isolated browser fixture on port 3041. Browser checks use simulated generations; paid NovelAI generation and physical smartphones require separate verification.
 
 ## Tag Data Attribution
 
